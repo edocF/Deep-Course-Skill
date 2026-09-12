@@ -17,6 +17,9 @@ library. All identifiers are stable strings and do not depend on display titles.
   after initialization.
 - Validation is read-only. Unknown versions fail closed and are never migrated or
   rewritten automatically.
+- Every owned state-file path must resolve within the course root before it is read.
+  A symlink escaping the root is rejected with `path_outside_root`. Session inspection
+  repeats this check for files it rereads after validation.
 - Callers must run `validate` successfully before generating or recording a lesson.
   `next-session` enforces this boundary itself.
 
@@ -59,7 +62,7 @@ also declare `prerequisite_knowledge_ids`. The initial document contains empty l
 
 ### `progress.json`
 
-This file owns `knowledge`, an object keyed by curriculum knowledge ID, and
+This file requires and owns `knowledge`, an object keyed by curriculum knowledge ID, and
 `completed_lessons`, a list of stable lesson IDs. A knowledge entry may carry
 `last_practiced_at` and `next_review_at`. Knowledge status values are `unseen`,
 `learning`, `relearning`, `reviewing`, and `mastered`. The initial `knowledge` object
@@ -71,6 +74,10 @@ Each line is one UTF-8 JSON object. Task 2 recognizes the version, optional `cou
 the timestamp fields `submitted_at`, `occurred_at`, and `exported_at`, top-level
 `misconception_tags`, and response-level `misconception_tags`. Later state operations
 extend this append-only record without changing these validation rules.
+
+`responses` is optional; when present, it must be a list of objects. Top-level and
+response-level `misconception_tags` are optional lists of strings. An absent field
+acts as an empty list; explicit nulls, scalars, and invalid list members fail validation.
 
 ## Python interfaces
 
@@ -102,9 +109,10 @@ course_state.py validate --root PATH
 course_state.py next-session --root PATH --now ISO8601
 ```
 
-Each successful command writes exactly one JSON object to stdout. `validate` returning
-`"valid": false` is a successful inspection and still exits zero. A domain error writes
-exactly one object of this shape to stderr and exits `2`:
+Each successful command writes exactly one JSON object to stdout and exits zero.
+If `validate_course()` returns `"valid": false`, the `validate` CLI raises the
+`invalid_course_state` domain error. A domain error writes exactly one object of
+this shape to stderr, leaves stdout empty, and exits `2`:
 
 ```json
 {"ok": false, "error": {"code": "...", "message": "...", "path": null}}

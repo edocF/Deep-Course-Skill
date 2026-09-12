@@ -4,6 +4,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
@@ -348,6 +349,132 @@ class NextSessionTests(CourseFixture):
         self.assertEqual("invalid_course_state", raised.exception.code)
 
 
+class RobustValidationTests(CourseFixture):
+    def test_missing_progress_knowledge_is_invalid(self):
+        progress = self.read_json("progress.json")
+        del progress["knowledge"]
+        self.write_json("progress.json", progress)
+        report = course_state.validate_course(self.root)
+        self.assertFalse(report["valid"])
+        self.assertIn(("invalid_field", "knowledge"), {(e["code"], e.get("field")) for e in report["errors"]})
+        with self.assertRaises(course_state.CourseStateError) as raised:
+            course_state.next_session(self.root, CREATED_AT)
+        self.assertEqual("invalid_course_state", raised.exception.code)
+
+    def test_malformed_attempt_inspection_structures_are_rejected(self):
+        cases = [
+            ({"responses": value}, "responses")
+            for value in (1, None, "answer", {})
+        ] + [
+            ({"responses": [value]}, "responses[0]")
+            for value in (1, None, "answer", [])
+        ] + [
+            ({"misconception_tags": value}, "misconception_tags")
+            for value in (1, None, "tag", {}, [1], [[]], [{}])
+        ] + [
+            ({"responses": [{"misconception_tags": value}]}, "responses[0].misconception_tags")
+            for value in (1, None, "tag", {}, [1], [[]], [{}])
+        ]
+        for fields, field in cases:
+            with self.subTest(fields=fields):
+                record = {"schema_version": 1, **fields}
+                (self.root / "attempts.jsonl").write_text(
+                    json.dumps({"schema_version": 1}) + "\n" + json.dumps(record) + "\n",
+                    encoding="utf-8",
+                )
+                report = course_state.validate_course(self.root)
+                self.assertFalse(report["valid"])
+                self.assertIn(("invalid_field", "line 2." + field), {(e["code"], e.get("field")) for e in report["errors"]})
+                with self.assertRaises(course_state.CourseStateError) as raised:
+                    course_state.next_session(self.root, CREATED_AT)
+                self.assertEqual("invalid_course_state", raised.exception.code)
+
+    def test_valid_optional_attempt_structures_are_inspectable(self):
+        records = [
+            {"schema_version": 1},
+            {"schema_version": 1, "responses": []},
+            {"schema_version": 1, "responses": [{}, {"misconception_tags": ["sign", "units"]}], "misconception_tags": ["units"]},
+        ]
+        (self.root / "attempts.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+        )
+        self.assertTrue(course_state.validate_course(self.root)["valid"])
+        self.assertEqual(["units", "sign"], course_state.next_session(self.root, CREATED_AT)["recent_misconception_tags"])
+
+    def test_non_string_enums_return_validation_errors(self):
+        curriculum = self.read_json("curriculum.json")
+        curriculum["knowledge_nodes"] = [{"knowledge_id": "pv", "prerequisite_ids": []}]
+        self.write_json("curriculum.json", curriculum)
+        progress = self.read_json("progress.json")
+        progress["knowledge"] = {"pv": {"status": "learning"}}
+        self.write_json("progress.json", progress)
+        cases = [
+            ("course.json", ("status",), "status"),
+            ("course.json", ("session_depth",), "session_depth"),
+            ("curriculum.json", ("status",), "status"),
+            ("progress.json", ("knowledge", "pv", "status"), "knowledge.pv.status"),
+        ]
+        for name, keys, field in cases:
+            original = self.read_json(name)
+            for value in ([], {}, None, 1, True):
+                with self.subTest(name=name, field=field, value=value):
+                    document = self.read_json(name)
+                    entry = document
+                    for key in keys[:-1]:
+                        entry = entry[key]
+                    entry[keys[-1]] = value
+                    self.write_json(name, document)
+                    try:
+                        report = course_state.validate_course(self.root)
+                        self.assertFalse(report["valid"])
+                        self.assertIn(("invalid_enum", field), {(e["code"], e.get("field")) for e in report["errors"]})
+                        with self.assertRaises(course_state.CourseStateError) as raised:
+                            course_state.next_session(self.root, CREATED_AT)
+                        self.assertEqual("invalid_course_state", raised.exception.code)
+                    finally:
+                        self.write_json(name, original)
+
+
+class ContainmentTests(CourseFixture):
+    def escaped_resolution(self, name):
+        resolve = Path.resolve
+
+        def resolve_path(path, *args, **kwargs):
+            if path == self.root / name:
+                return resolve(self.root.parent / name)
+            return resolve(path, *args, **kwargs)
+
+        return patch.object(Path, "resolve", resolve_path)
+
+    def test_owned_state_paths_cannot_resolve_outside_root(self):
+        for name in (*course_state.STATE_FILES, "attempts.jsonl"):
+            with self.subTest(name=name):
+                with self.escaped_resolution(name):
+                    report = course_state.validate_course(self.root)
+                    self.assertFalse(report["valid"])
+                    self.assertIn("path_outside_root", {e["code"] for e in report["errors"]})
+                    with self.assertRaises(course_state.CourseStateError) as raised:
+                        course_state.next_session(self.root, CREATED_AT)
+                    self.assertEqual("invalid_course_state", raised.exception.code)
+
+    def test_next_session_checks_paths_again_after_validation(self):
+        validate = course_state.validate_course
+        for name in ("curriculum.json", "progress.json", "attempts.jsonl"):
+            with self.subTest(name=name):
+                def validate_then_replace(root):
+                    report = validate(root)
+                    escaped.start()
+                    return report
+
+                escaped = self.escaped_resolution(name)
+                try:
+                    with patch.object(course_state, "validate_course", validate_then_replace):
+                        with self.assertRaises(course_state.CourseStateError):
+                            course_state.next_session(self.root, CREATED_AT)
+                finally:
+                    escaped.stop()
+
+
 class CommandLineTests(unittest.TestCase):
     script = SCRIPTS_DIR / "course_state.py"
 
@@ -410,6 +537,17 @@ class CommandLineTests(unittest.TestCase):
             error = json.loads(result.stderr)
             self.assertEqual(False, error["ok"])
             self.assertEqual("course_directory_not_empty", error["error"]["code"])
+            self.assertEqual(str(root), error["error"]["path"])
+
+    def test_invalid_validation_exits_two_with_domain_error(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "missing"
+            result = self.run_cli("validate", "--root", root)
+            self.assertEqual(2, result.returncode)
+            self.assertEqual("", result.stdout)
+            error = json.loads(result.stderr)
+            self.assertFalse(error["ok"])
+            self.assertEqual("invalid_course_state", error["error"]["code"])
             self.assertEqual(str(root), error["error"]["path"])
 
 

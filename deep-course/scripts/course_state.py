@@ -156,12 +156,24 @@ def _issue(code: str, message: str, path: Path, field: str | None = None) -> dic
     return issue
 
 
-def _read_json_document(path: Path, errors: list[dict]) -> dict | None:
+def _owned_path(root: Path, path: Path) -> Path:
+    resolved = path.resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise CourseStateError("path_outside_root", "owned state path resolves outside course root", path)
+    return resolved
+
+
+def _read_json_document(root: Path, path: Path, errors: list[dict]) -> dict | None:
+    try:
+        read_path = _owned_path(root, path)
+    except CourseStateError as error:
+        errors.append(_issue(error.code, error.message, path))
+        return None
     if not path.is_file():
         errors.append(_issue("missing_file", f"missing {path.name}", path))
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(read_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         errors.append(_issue("malformed_json", f"cannot read {path.name}: {error}", path))
         return None
@@ -206,7 +218,7 @@ def _check_enum(
     errors: list[dict],
 ) -> None:
     value = document.get(field)
-    if value not in allowed:
+    if not isinstance(value, str) or value not in allowed:
         errors.append(
             _issue(
                 "invalid_enum",
@@ -227,12 +239,17 @@ def _check_list_fields(
             )
 
 
-def _read_attempts(path: Path, errors: list[dict]) -> list[tuple[int, dict]]:
+def _read_attempts(root: Path, path: Path, errors: list[dict]) -> list[tuple[int, dict]]:
+    try:
+        read_path = _owned_path(root, path)
+    except CourseStateError as error:
+        errors.append(_issue(error.code, error.message, path))
+        return []
     if not path.is_file():
         errors.append(_issue("missing_file", "missing attempts.jsonl", path))
         return []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = read_path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as error:
         errors.append(_issue("malformed_jsonl", f"cannot read attempts.jsonl: {error}", path))
         return []
@@ -263,6 +280,14 @@ def _read_attempts(path: Path, errors: list[dict]) -> list[tuple[int, dict]]:
             continue
         records.append((line_number, record))
     return records
+
+
+def _check_misconception_tags(document: dict, path: Path, field: str, errors: list[dict]) -> None:
+    if "misconception_tags" not in document:
+        return
+    tags = document["misconception_tags"]
+    if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+        errors.append(_issue("invalid_field", "misconception_tags must be a list of strings", path, field))
 
 
 def _validate_knowledge_graph(curriculum: dict, path: Path, errors: list[dict]) -> set[str]:
@@ -362,7 +387,7 @@ def validate_course(root: Path) -> dict:
     root = Path(root)
     errors: list[dict] = []
     documents = {
-        name: _read_json_document(root / name, errors) for name in STATE_FILES
+        name: _read_json_document(root, root / name, errors) for name in STATE_FILES
     }
     for name, document in documents.items():
         if document is not None:
@@ -497,7 +522,7 @@ def validate_course(root: Path) -> dict:
                     "completed_lessons",
                 )
             )
-        knowledge = progress.get("knowledge", {})
+        knowledge = progress.get("knowledge")
         if not isinstance(knowledge, dict):
             errors.append(
                 _issue(
@@ -528,7 +553,10 @@ def validate_course(root: Path) -> dict:
                         )
                     )
                     continue
-                if "status" in entry and entry["status"] not in KNOWLEDGE_STATUSES:
+                if "status" in entry and (
+                    not isinstance(entry["status"], str)
+                    or entry["status"] not in KNOWLEDGE_STATUSES
+                ):
                     errors.append(
                         _issue(
                             "invalid_enum",
@@ -550,9 +578,21 @@ def validate_course(root: Path) -> dict:
                         )
 
     attempts_path = root / "attempts.jsonl"
-    attempts = _read_attempts(attempts_path, errors)
+    attempts = _read_attempts(root, attempts_path, errors)
     for line_number, attempt in attempts:
         _check_schema(attempt, attempts_path, errors)
+        field = f"line {line_number}"
+        _check_misconception_tags(attempt, attempts_path, f"{field}.misconception_tags", errors)
+        responses = attempt.get("responses", [])
+        if not isinstance(responses, list):
+            errors.append(_issue("invalid_field", "responses must be a list of objects", attempts_path, f"{field}.responses"))
+        else:
+            for index, response in enumerate(responses):
+                response_field = f"{field}.responses[{index}]"
+                if not isinstance(response, dict):
+                    errors.append(_issue("invalid_field", "response must be an object", attempts_path, response_field))
+                    continue
+                _check_misconception_tags(response, attempts_path, f"{response_field}.misconception_tags", errors)
         if "course_id" in attempt and isinstance(course_id, str) and attempt["course_id"] != course_id:
             errors.append(
                 _issue(
@@ -594,8 +634,8 @@ def next_session(root: Path, now: str) -> dict:
             "now must be an ISO 8601 timestamp with an explicit offset",
         )
 
-    curriculum = json.loads((root / "curriculum.json").read_text(encoding="utf-8"))
-    progress = json.loads((root / "progress.json").read_text(encoding="utf-8"))
+    curriculum = json.loads(_owned_path(root, root / "curriculum.json").read_text(encoding="utf-8"))
+    progress = json.loads(_owned_path(root, root / "progress.json").read_text(encoding="utf-8"))
     knowledge_progress = progress["knowledge"]
     due = []
     for knowledge_id, entry in knowledge_progress.items():
@@ -626,7 +666,9 @@ def next_session(root: Path, now: str) -> dict:
             break
 
     attempt_errors: list[dict] = []
-    attempts = _read_attempts(root / "attempts.jsonl", attempt_errors)
+    attempts = _read_attempts(root, root / "attempts.jsonl", attempt_errors)
+    if attempt_errors:
+        raise CourseStateError("invalid_course_state", "cannot inspect attempts", root / "attempts.jsonl")
     recent_tags = []
     seen_tags = set()
     for _, attempt in reversed(attempts[-5:]):
@@ -680,6 +722,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif arguments.command == "validate":
             result = validate_course(arguments.root)
+            if not result["valid"]:
+                raise CourseStateError(
+                    "invalid_course_state",
+                    f"course state is invalid ({len(result['errors'])} error(s))",
+                    arguments.root,
+                )
         else:
             result = next_session(arguments.root, arguments.now)
     except CourseStateError as error:
