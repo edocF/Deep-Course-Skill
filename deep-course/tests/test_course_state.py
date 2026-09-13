@@ -183,6 +183,33 @@ class AttemptTests(CourseFixture):
             (root / "attempts.jsonl").read_text(encoding="utf-8"),
         )
 
+    def test_attempt_text_with_unicode_line_separators_round_trips(self):
+        root = self.make_course_with_node("pv")
+        answer = "first\u2028second\u2029third\u0085fourth"
+        attempt = self.attempt(
+            responses=[
+                {
+                    "question_id": "q1",
+                    "knowledge_ids": ["pv"],
+                    "answer": answer,
+                }
+            ]
+        )
+
+        result = course_state.append_attempt(root, attempt)
+        validation = course_state.validate_course(root)
+        second = course_state.append_attempt(root, self.attempt(attempt_id="attempt-next"))
+
+        self.assertEqual({"attempt_id": "attempt-new", "line_index": 0}, result)
+        self.assertTrue(validation["valid"], validation["errors"])
+        self.assertEqual({"attempt_id": "attempt-next", "line_index": 1}, second)
+        records = [
+            json.loads(line)
+            for line in (root / "attempts.jsonl").read_text(encoding="utf-8").split("\n")
+            if line
+        ]
+        self.assertEqual(answer, records[0]["responses"][0]["answer"])
+
     def test_unknown_response_knowledge_id_is_rejected_without_writing(self):
         root = self.make_course_with_node("pv")
         attempts_path = root / "attempts.jsonl"
@@ -272,6 +299,34 @@ class AttemptTests(CourseFixture):
                     course_state.append_attempt(root, attempt)
                 self.assertEqual("injected_path_field", raised.exception.code)
                 self.assertEqual(before, attempts_path.read_bytes())
+
+    def test_path_fields_nested_in_tuples_are_rejected_without_writing(self):
+        root = self.make_course_with_node("pv")
+        course_state.append_attempt(root, self.attempt(attempt_id="prior"))
+        attempts_path = root / "attempts.jsonl"
+        before = attempts_path.read_bytes()
+        attempt = self.attempt(
+            metadata=({"nested": ({"artifact_path": "../../outside.json"},)},)
+        )
+
+        with self.assertRaises(course_state.CourseStateError) as raised:
+            course_state.append_attempt(root, attempt)
+
+        self.assertEqual("injected_path_field", raised.exception.code)
+        self.assertEqual(before, attempts_path.read_bytes())
+
+    def test_unencodable_attempt_is_rejected_without_writing(self):
+        root = self.make_course_with_node("pv")
+        course_state.append_attempt(root, self.attempt(attempt_id="prior"))
+        attempts_path = root / "attempts.jsonl"
+        before = attempts_path.read_bytes()
+        attempt = self.attempt(metadata={"note": "unpaired surrogate: \ud800"})
+
+        with self.assertRaises(course_state.CourseStateError) as raised:
+            course_state.append_attempt(root, attempt)
+
+        self.assertEqual("invalid_field", raised.exception.code)
+        self.assertEqual(before, attempts_path.read_bytes())
 
 
 class MasteryTests(CourseFixture):

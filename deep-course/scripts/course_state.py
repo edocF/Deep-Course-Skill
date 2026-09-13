@@ -250,7 +250,9 @@ def _read_attempts(root: Path, path: Path, errors: list[dict]) -> list[tuple[int
         errors.append(_issue("missing_file", "missing attempts.jsonl", path))
         return []
     try:
-        lines = read_path.read_text(encoding="utf-8").splitlines()
+        lines = read_path.read_text(encoding="utf-8").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
     except (OSError, UnicodeError) as error:
         errors.append(_issue("malformed_jsonl", f"cannot read attempts.jsonl: {error}", path))
         return []
@@ -707,13 +709,15 @@ def _checked_payload(value: Any) -> str:
                 if key in {"path", "paths"} or key.endswith(("_path", "_paths")):
                     raise CourseStateError("injected_path_field", "records cannot supply filesystem path fields")
                 check(child)
-        elif isinstance(item, list):
+        elif isinstance(item, (list, tuple)):
             for child in item:
                 check(child)
     try:
         check(value)
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError, RecursionError) as error:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        serialized.encode("utf-8")
+        return serialized
+    except (TypeError, ValueError, RecursionError, UnicodeError) as error:
         raise CourseStateError("invalid_field", "record must contain finite, serializable JSON values") from error
 
 
