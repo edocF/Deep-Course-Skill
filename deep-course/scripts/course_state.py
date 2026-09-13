@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import tempfile
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -25,6 +26,8 @@ SESSION_DEPTHS = {"light", "normal", "deep"}
 CURRICULUM_STATUSES = {"draft", "proposed", "approved"}
 KNOWLEDGE_STATUSES = {"unseen", "learning", "relearning", "reviewing", "mastered"}
 EVIDENCE_QUALITIES = {"incorrect", "partial", "correct", "effortless"}
+LESSON_STATUSES = ("draft", "ready", "delivered", "assessed")
+CORE_ARTIFACTS = {"lesson.html", "lesson.md", "exercises.md", "answers.md", "sources.md", "state.json"}
 STATE_FILES = (
     "course.json",
     "learner-profile.json",
@@ -900,6 +903,181 @@ def apply_mastery_updates(root: Path, attempt_id: str, updates: list[dict], occu
     changed = list(seen)
     return {"attempt_id": attempt_id, "changed_knowledge_ids": changed,
             "next_review_at": {key: progress["knowledge"][key]["next_review_at"] for key in changed}}
+
+
+def _lesson_relative_path(root: Path, value: Any, directory: str | None = None) -> Path:
+    if (not isinstance(value, str) or not value or "\\" in value or ":" in value
+            or "\x00" in value or PurePosixPath(value).is_absolute()
+            or ".." in value.split("/")):
+        raise CourseStateError("invalid_artifact_path", "lesson paths must be relative POSIX descendants")
+    relative = PurePosixPath(value)
+    if (len(relative.parts) < 2 or relative.parts[0] != "lessons"
+            or (directory is None and len(relative.parts) != 2)):
+        raise CourseStateError("invalid_artifact_path", "lesson_directory must be lessons/<lesson-directory>")
+    root = root.resolve()
+    try:
+        resolved = (root / relative).resolve()
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CourseStateError("invalid_artifact_path", "cannot resolve lesson path") from error
+    expected = root / (PurePosixPath(directory) if directory is not None else relative)
+    if (not resolved.is_relative_to(root) or not resolved.is_relative_to(expected)
+            or (directory is not None and resolved == expected)
+            or (directory is None and resolved != expected)):
+        raise CourseStateError("invalid_artifact_path", "artifact resolves outside its lesson directory")
+    return resolved
+
+
+def _lesson_manifest_shape(root: Path, manifest: dict, course_id: str) -> dict:
+    allowed = {"schema_version", "course_id", "lesson_id", "lesson_directory", "status",
+               "learning_objectives", "artifacts", "delivered_at", "attempt_ids"}
+    if not isinstance(manifest, dict) or any(key not in allowed for key in manifest):
+        raise CourseStateError("invalid_field", "lesson manifest has unknown fields or is not an object")
+    if type(manifest.get("schema_version")) is not int or manifest["schema_version"] != SCHEMA_VERSION:
+        raise CourseStateError("unsupported_schema_version", "lesson schema_version must be integer 1")
+    if manifest.get("course_id") != course_id:
+        raise CourseStateError("course_id_mismatch", "lesson belongs to another course")
+    if not isinstance(manifest.get("lesson_id"), str) or not manifest["lesson_id"].strip():
+        raise CourseStateError("invalid_field", "lesson_id must be a nonempty string")
+    if not isinstance(manifest.get("status"), str) or manifest["status"] not in LESSON_STATUSES:
+        raise CourseStateError("invalid_enum", "lesson status must be draft, ready, delivered, or assessed")
+    lesson_dir = _lesson_relative_path(root, manifest.get("lesson_directory"))
+    directory = lesson_dir.relative_to(root.resolve()).as_posix()
+    objectives = manifest.get("learning_objectives")
+    if not isinstance(objectives, list) or not all(isinstance(item, str) and item.strip() for item in objectives):
+        raise CourseStateError("invalid_field", "learning_objectives must be a list of nonempty strings")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise CourseStateError("invalid_field", "artifacts must be a list")
+    normalized_artifacts = []
+    seen = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict) or set(artifact) - {"path", "sha256"}:
+            raise CourseStateError("invalid_field", "each artifact requires path and, except state.json, sha256")
+        path = _lesson_relative_path(root, artifact.get("path"), directory)
+        relative = path.relative_to(root.resolve()).as_posix()
+        if relative in seen:
+            raise CourseStateError("duplicate_artifact_path", "artifact paths must be unique")
+        seen.add(relative)
+        item = {"path": relative}
+        if path == lesson_dir / "state.json":
+            if "sha256" in artifact:
+                raise CourseStateError("invalid_artifact_hash", "state.json cannot contain a hash of itself")
+        else:
+            digest = artifact.get("sha256")
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(char not in "0123456789abcdefABCDEF" for char in digest)):
+                raise CourseStateError("invalid_artifact_hash", "artifact sha256 must be a 64-digit hexadecimal string")
+            item["sha256"] = digest.lower()
+        normalized_artifacts.append(item)
+    result = {**manifest, "lesson_directory": directory, "artifacts": normalized_artifacts,
+              "learning_objectives": list(objectives)}
+    # Complete preflight before atomic_write_json opens a temporary output.
+    try:
+        json.dumps(result, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError) as error:
+        raise CourseStateError("invalid_field", "manifest must contain valid finite JSON") from error
+    return result
+
+
+def _check_lesson_artifacts(root: Path, manifest: dict) -> None:
+    directory = manifest["lesson_directory"]
+    if manifest["status"] != "draft":
+        supplied = {item["path"] for item in manifest["artifacts"]}
+        missing = sorted(f"{directory}/{name}" for name in CORE_ARTIFACTS if f"{directory}/{name}" not in supplied)
+        if missing:
+            raise CourseStateError("missing_core_artifact", "missing core artifact: " + ", ".join(missing))
+        if not manifest["learning_objectives"]:
+            raise CourseStateError("invalid_field", "ready lessons require nonempty learning_objectives")
+    for item in manifest["artifacts"]:
+        path = _lesson_relative_path(root, item["path"], directory)
+        if item["path"] == f"{directory}/state.json":
+            continue  # Written atomically from this manifest; a self hash is impossible.
+        if not path.is_file():
+            raise CourseStateError("missing_artifact", f"missing artifact {item['path']}", path)
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError as error:
+            raise CourseStateError("unreadable_artifact", f"cannot read artifact {item['path']}", path) from error
+        if digest != item["sha256"]:
+            raise CourseStateError("artifact_hash_mismatch", f"sha256 mismatch for {item['path']}", path)
+
+
+def record_lesson(root: Path, manifest: dict) -> dict:
+    """Validate lesson files and atomically advance state.json, under one writer.
+
+    validate_course checks root-level state only. Call this boundary at every
+    lesson transition or replay it unchanged to verify existing artifact bytes.
+    This operation does not mark progress.completed_lessons or alter mastery.
+    """
+    root = Path(root).resolve()
+    if not validate_course(root)["valid"]:
+        raise CourseStateError("invalid_course_state", "course state is invalid", root)
+    course = json.loads(_owned_path(root, root / "course.json").read_text(encoding="utf-8"))
+    candidate = _lesson_manifest_shape(root, manifest, course["course_id"])
+    directory = candidate["lesson_directory"]
+    lesson_dir = _lesson_relative_path(root, directory)
+    if not lesson_dir.is_dir():
+        raise CourseStateError("missing_artifact", "create the lesson directory before recording", lesson_dir)
+    state_path = lesson_dir / "state.json"
+    if state_path.is_symlink():
+        raise CourseStateError("invalid_artifact_path", "state.json must not be a symbolic link", state_path)
+    previous = None
+    # Lesson-local state is the registry: no second mutable index can drift.
+    lessons_dir = _owned_path(root, root / "lessons")
+    for child in lessons_dir.iterdir():
+        existing_path = child / "state.json"
+        if not (existing_path.exists() or existing_path.is_symlink()):
+            continue
+        _lesson_relative_path(root, child.relative_to(root).as_posix())
+        errors: list[dict] = []
+        existing = _read_json_document(root, existing_path, errors)
+        if errors:
+            raise CourseStateError("invalid_lesson_state", "cannot read existing lesson state", existing_path)
+        existing = _lesson_manifest_shape(root, existing, course["course_id"])
+        if existing["lesson_directory"] != child.relative_to(root).as_posix():
+            raise CourseStateError("invalid_lesson_state", "stored lesson directory differs from its location", existing_path)
+        if existing["lesson_id"] == candidate["lesson_id"]:
+            if existing["lesson_directory"] != directory:
+                raise CourseStateError("duplicate_lesson_id", "duplicate lesson_id in another directory")
+            previous = existing
+        elif child == lesson_dir:
+            raise CourseStateError("duplicate_lesson_directory", "lesson directory already belongs to another lesson_id")
+    status = candidate["status"]
+    if previous is None:
+        legal = status == "draft"
+    else:
+        legal = candidate == previous or LESSON_STATUSES.index(status) == LESSON_STATUSES.index(previous["status"]) + 1
+    if not legal:
+        raise CourseStateError("invalid_lesson_transition", "allow only draft -> ready -> delivered -> assessed or unchanged replay")
+    if status in {"delivered", "assessed"}:
+        if _timestamp(candidate.get("delivered_at")) is None:
+            raise CourseStateError("invalid_timestamp", "delivered_at requires an explicit timezone offset")
+        if previous and previous["status"] in {"delivered", "assessed"} and candidate["delivered_at"] != previous.get("delivered_at"):
+            raise CourseStateError("invalid_lesson_transition", "delivered_at is immutable once delivered")
+    elif "delivered_at" in candidate:
+        raise CourseStateError("invalid_field", "delivered_at is valid only after delivery")
+    if status == "assessed":
+        ids = candidate.get("attempt_ids")
+        if (not isinstance(ids, list) or not ids or not all(isinstance(item, str) and item for item in ids)
+                or len(ids) != len(set(ids))):
+            raise CourseStateError("invalid_field", "assessed lessons require unique nonempty attempt_ids")
+        errors = []
+        attempts = _read_attempts(root, root / "attempts.jsonl", errors)
+        if errors:
+            raise CourseStateError("invalid_course_state", "cannot read attempts")
+        recorded = {item.get("attempt_id"): item for _, item in attempts if isinstance(item.get("attempt_id"), str)}
+        for attempt_id in ids:
+            if attempt_id not in recorded:
+                raise CourseStateError("unknown_attempt_id", "assessed lesson references missing attempt")
+            if recorded[attempt_id].get("lesson_id") != candidate["lesson_id"]:
+                raise CourseStateError("attempt_lesson_mismatch", "attempt belongs to another lesson")
+    elif "attempt_ids" in candidate:
+        raise CourseStateError("invalid_field", "attempt_ids is valid only for assessed lessons")
+    _check_lesson_artifacts(root, candidate)
+    if candidate != previous:
+        _lesson_relative_path(root, f"{directory}/state.json", directory)
+        atomic_write_json(state_path, candidate)
+    return candidate
 
 
 def next_session(root: Path, now: str) -> dict:
