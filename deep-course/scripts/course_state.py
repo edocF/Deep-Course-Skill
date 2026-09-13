@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ COURSE_STATUSES = {
 SESSION_DEPTHS = {"light", "normal", "deep"}
 CURRICULUM_STATUSES = {"draft", "proposed", "approved"}
 KNOWLEDGE_STATUSES = {"unseen", "learning", "relearning", "reviewing", "mastered"}
+EVIDENCE_QUALITIES = {"incorrect", "partial", "correct", "effortless"}
 STATE_FILES = (
     "course.json",
     "learner-profile.json",
@@ -381,14 +382,60 @@ def _validate_knowledge_graph(curriculum: dict, path: Path, errors: list[dict]) 
     return known_ids
 
 
+def _validate_mastery_fields(progress: dict, path: Path, errors: list[dict]) -> None:
+    applied = progress.get("applied_attempt_ids", [])
+    if (not isinstance(applied, list) or not all(isinstance(item, str) and item for item in applied)
+            or len(applied) != len(set(applied))):
+        errors.append(_issue("invalid_field", "applied_attempt_ids must contain unique strings", path))
+    knowledge = progress.get("knowledge", {})
+    if not isinstance(knowledge, dict):
+        return
+    for knowledge_id, entry in knowledge.items():
+        if not isinstance(entry, dict):
+            continue
+        for field in ("mastery", "confidence"):
+            value = entry.get(field, 0.0)
+            if type(value) not in (int, float) or not 0 <= value <= 1:
+                errors.append(_issue("invalid_field", f"{field} must be a finite number in [0, 1]", path,
+                                     f"knowledge.{knowledge_id}.{field}"))
+        interval = entry.get("interval_days", 0)
+        if type(interval) is not int or interval < 0:
+            errors.append(_issue("invalid_field", "interval_days must be a nonnegative integer", path,
+                                 f"knowledge.{knowledge_id}.interval_days"))
+        evidence = entry.get("evidence", [])
+        if not isinstance(evidence, list):
+            errors.append(_issue("invalid_field", "evidence must be a list", path))
+            continue
+        seen = set()
+        for item in evidence:
+            if (not isinstance(item, dict) or not isinstance(item.get("attempt_id"), str)
+                    or not item["attempt_id"] or not isinstance(item.get("quality"), str)
+                    or item["quality"] not in EVIDENCE_QUALITIES
+                    or _timestamp(item.get("occurred_at")) is None
+                    or (item.get("question_id") is not None and not isinstance(item["question_id"], str))):
+                errors.append(_issue("invalid_field", "malformed mastery evidence", path))
+                continue
+            key = (item["attempt_id"], item.get("question_id"))
+            if key in seen:
+                errors.append(_issue("duplicate_evidence", "duplicate mastery evidence", path))
+            seen.add(key)
+
+
 def validate_course(root: Path) -> dict:
     """Return all deterministic validation findings without modifying the course."""
+
+    return _validate_course(root)
+
+
+def _validate_course(root: Path, progress_override: dict | None = None) -> dict:
 
     root = Path(root)
     errors: list[dict] = []
     documents = {
         name: _read_json_document(root, root / name, errors) for name in STATE_FILES
     }
+    if progress_override is not None:
+        documents["progress.json"] = progress_override
     for name, document in documents.items():
         if document is not None:
             _check_schema(document, root / name, errors)
@@ -510,6 +557,7 @@ def validate_course(root: Path) -> dict:
 
     progress = documents["progress.json"]
     if progress is not None:
+        _validate_mastery_fields(progress, root / "progress.json", errors)
         completed_lessons = progress.get("completed_lessons")
         if not isinstance(completed_lessons, list) or not all(
             isinstance(item, str) for item in completed_lessons
@@ -579,9 +627,25 @@ def validate_course(root: Path) -> dict:
 
     attempts_path = root / "attempts.jsonl"
     attempts = _read_attempts(root, attempts_path, errors)
+    recorded_ids = set()
     for line_number, attempt in attempts:
         _check_schema(attempt, attempts_path, errors)
         field = f"line {line_number}"
+        if "attempt_id" in attempt:
+            try:
+                _checked_payload(attempt)
+                _check_new_attempt(attempt, course_id, known_ids)
+                if attempt["attempt_id"] in recorded_ids:
+                    raise CourseStateError("duplicate_attempt_id", "duplicate recorded attempt_id")
+                recorded_ids.add(attempt["attempt_id"])
+            except CourseStateError as error:
+                error_field = field
+                if error.code == "invalid_timestamp":
+                    invalid_timestamp = next(name for name in ("submitted_at", "occurred_at", "exported_at")
+                                             if (name == "submitted_at" or name in attempt)
+                                             and _timestamp(attempt.get(name)) is None)
+                    error_field = f"{field}.{invalid_timestamp}"
+                errors.append(_issue(error.code, error.message, attempts_path, error_field))
         _check_misconception_tags(attempt, attempts_path, f"{field}.misconception_tags", errors)
         responses = attempt.get("responses", [])
         if not isinstance(responses, list):
@@ -613,7 +677,225 @@ def validate_course(root: Path) -> dict:
                     )
                 )
 
+    if progress is not None:
+        applied = progress.get("applied_attempt_ids", [])
+        if isinstance(applied, list):
+            for identifier in applied:
+                if isinstance(identifier, str) and identifier not in recorded_ids:
+                    errors.append(_issue("unknown_attempt_id", "applied attempt is not recorded", root / "progress.json"))
+        knowledge = progress.get("knowledge", {})
+        if isinstance(knowledge, dict):
+            for entry in knowledge.values():
+                if not isinstance(entry, dict) or not isinstance(entry.get("evidence", []), list):
+                    continue
+                for item in entry.get("evidence", []):
+                    if not isinstance(item, dict) or not isinstance(item.get("attempt_id"), str):
+                        continue
+                    if item["attempt_id"] not in recorded_ids or not isinstance(applied, list) or item["attempt_id"] not in applied:
+                        errors.append(_issue("invalid_evidence", "evidence must reference a recorded applied attempt", root / "progress.json"))
+
     return {"valid": not errors, "errors": errors, "warnings": []}
+
+
+def _checked_payload(value: Any) -> str:
+    """Reject path injection and serialize fully before opening any output."""
+    def check(item: Any) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise CourseStateError("invalid_field", "JSON object keys must be strings")
+                if key in {"path", "paths"} or key.endswith(("_path", "_paths")):
+                    raise CourseStateError("injected_path_field", "records cannot supply filesystem path fields")
+                check(child)
+        elif isinstance(item, list):
+            for child in item:
+                check(child)
+    try:
+        check(value)
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise CourseStateError("invalid_field", "record must contain finite, serializable JSON values") from error
+
+
+def _check_grading_fields(value: dict) -> None:
+    if "quality" in value and (not isinstance(value["quality"], str) or value["quality"] not in EVIDENCE_QUALITIES):
+        raise CourseStateError("invalid_quality", "quality must be incorrect, partial, correct, or effortless")
+    if "misconception_tags" in value and (not isinstance(value["misconception_tags"], list)
+            or not all(isinstance(tag, str) for tag in value["misconception_tags"])):
+        raise CourseStateError("invalid_field", "misconception_tags must be a list of strings")
+    if "feedback" in value and not isinstance(value["feedback"], str):
+        raise CourseStateError("invalid_field", "feedback must be a string")
+
+
+def _check_new_attempt(attempt: dict, course_id: str, known_ids: set[str]) -> None:
+    if type(attempt.get("schema_version")) is not int or attempt["schema_version"] != SCHEMA_VERSION:
+        raise CourseStateError("unsupported_schema_version", "attempt schema_version must be integer 1")
+    for field in ("attempt_id", "lesson_id"):
+        if not isinstance(attempt.get(field), str) or not attempt[field]:
+            raise CourseStateError("invalid_field", f"{field} must be a nonempty string")
+    if "course_id" in attempt and attempt["course_id"] != course_id:
+        raise CourseStateError("course_id_mismatch", "attempt belongs to another course")
+    for field in ("submitted_at", "occurred_at", "exported_at"):
+        if (field == "submitted_at" or field in attempt) and _timestamp(attempt.get(field)) is None:
+            raise CourseStateError("invalid_timestamp", f"{field} must have an explicit timezone offset")
+    _check_grading_fields(attempt)
+    responses = attempt.get("responses")
+    if not isinstance(responses, list):
+        raise CourseStateError("invalid_field", "responses must be a list")
+    seen = set()
+    for response in responses:
+        if not isinstance(response, dict):
+            raise CourseStateError("invalid_field", "each response must be an object")
+        question_id = response.get("question_id")
+        if not isinstance(question_id, str) or not question_id or "answer" not in response:
+            raise CourseStateError("invalid_field", "each response requires question_id and answer")
+        if question_id in seen:
+            raise CourseStateError("duplicate_question_id", "response question_ids must be unique")
+        seen.add(question_id)
+        ids = response.get("knowledge_ids")
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise CourseStateError("invalid_field", "knowledge_ids must be a list of strings")
+        if any(item not in known_ids for item in ids):
+            raise CourseStateError("unknown_knowledge_id", "attempt references unknown knowledge_id")
+        _check_grading_fields(response)
+
+
+def append_attempt(root: Path, attempt: dict) -> dict:
+    """Validate and append one immutable attempt record."""
+
+    root = Path(root)
+    report = validate_course(root)
+    if not report["valid"]:
+        raise CourseStateError(
+            "invalid_course_state",
+            f"course state is invalid ({len(report['errors'])} error(s))",
+            root,
+        )
+    if not isinstance(attempt, dict):
+        raise CourseStateError("invalid_field", "attempt must be an object")
+
+    serialized = _checked_payload(attempt)
+    curriculum_path = root / "curriculum.json"
+    curriculum = json.loads(_owned_path(root, curriculum_path).read_text(encoding="utf-8"))
+    known_ids = {
+        node["knowledge_id"] for node in curriculum["knowledge_nodes"]
+    }
+    _check_new_attempt(attempt, curriculum["course_id"], known_ids)
+    attempt_id = attempt["attempt_id"]
+
+    attempts_path = root / "attempts.jsonl"
+    errors: list[dict] = []
+    attempts = _read_attempts(root, attempts_path, errors)
+    if errors:
+        raise CourseStateError("invalid_course_state", "cannot append to attempts", attempts_path)
+    if any(record.get("attempt_id") == attempt_id for _, record in attempts):
+        raise CourseStateError(
+            "duplicate_attempt_id", f"duplicate attempt_id {attempt_id!r}", attempts_path
+        )
+
+    write_path = _owned_path(root, attempts_path)
+    # A valid externally supplied JSONL file may lack its final line separator.
+    existing = write_path.read_bytes()
+    prefix = "\n" if existing and not existing.endswith((b"\n", b"\r")) else ""
+    with write_path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(prefix + serialized + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return {"attempt_id": attempt_id, "line_index": len(attempts)}
+
+
+def apply_mastery_updates(root: Path, attempt_id: str, updates: list[dict], occurred_at: str) -> dict:
+    """Apply Codex-judged evidence and review math in one progress transaction."""
+    root = Path(root)
+    if not validate_course(root)["valid"]:
+        raise CourseStateError("invalid_course_state", "course state is invalid", root)
+    occurred = _timestamp(occurred_at)
+    if occurred is None:
+        raise CourseStateError("invalid_timestamp", "occurred_at must have an explicit timezone offset")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        raise CourseStateError("invalid_field", "attempt_id must be a nonempty string")
+    _checked_payload(updates)
+    if not isinstance(updates, list) or not updates:
+        raise CourseStateError("invalid_field", "updates must be a nonempty list")
+
+    errors: list[dict] = []
+    attempts = _read_attempts(root, root / "attempts.jsonl", errors)
+    if errors:
+        raise CourseStateError("invalid_course_state", "cannot read attempts", root)
+    matches = [record for _, record in attempts if record.get("attempt_id") == attempt_id]
+    if len(matches) != 1:
+        raise CourseStateError("unknown_attempt_id", "attempt_id must identify exactly one recorded attempt")
+    attempt = matches[0]
+    progress_path = root / "progress.json"
+    progress = json.loads(_owned_path(root, progress_path).read_text(encoding="utf-8"))
+    applied = progress.setdefault("applied_attempt_ids", [])
+    if attempt_id in applied:
+        raise CourseStateError("duplicate_application", f"attempt {attempt_id!r} was already applied")
+    curriculum = json.loads(_owned_path(root, root / "curriculum.json").read_text(encoding="utf-8"))
+    known_ids = {node["knowledge_id"] for node in curriculum["knowledge_nodes"]}
+    responses = {response.get("question_id"): response for response in attempt.get("responses", [])
+                 if isinstance(response.get("question_id"), str)}
+    seen: dict[str, set[str | None]] = {}
+    for update in updates:
+        if not isinstance(update, dict):
+            raise CourseStateError("invalid_field", "each update must be an object")
+        knowledge_id = update.get("knowledge_id")
+        if not isinstance(knowledge_id, str) or knowledge_id not in known_ids:
+            raise CourseStateError("unknown_knowledge_id", "update references unknown knowledge_id")
+        if "quality" not in update:
+            raise CourseStateError("invalid_quality", "quality is required")
+        _check_grading_fields(update)
+        question_id = update.get("question_id")
+        if "question_id" in update and (not isinstance(question_id, str) or not question_id):
+            raise CourseStateError("invalid_field", "question_id must be a nonempty string when supplied")
+        if question_id is not None and (question_id not in responses
+                or knowledge_id not in responses[question_id].get("knowledge_ids", [])):
+            raise CourseStateError("invalid_evidence", "question evidence must match the recorded response and knowledge ID")
+        previous = seen.setdefault(knowledge_id, set())
+        if question_id in previous or (previous and (question_id is None or None in previous)):
+            raise CourseStateError("duplicate_evidence", "duplicate or overlapping evidence for one knowledge node")
+        previous.add(question_id)
+
+    deltas = {"incorrect": (-0.20, 0.05), "partial": (0.05, 0.05),
+              "correct": (0.15, 0.10), "effortless": (0.20, 0.10)}
+    for update in updates:
+        knowledge_id, quality = update["knowledge_id"], update["quality"]
+        entry = progress["knowledge"].setdefault(knowledge_id, {})
+        last = _timestamp(entry.get("last_practiced_at"))
+        if last is not None and occurred < last:
+            raise CourseStateError("out_of_order_evidence", "evidence cannot precede the last practice time")
+        mastery_delta, confidence_delta = deltas[quality]
+        entry["mastery"] = round(max(0.0, min(1.0, entry.get("mastery", 0.0) + mastery_delta)), 10)
+        entry["confidence"] = round(max(0.0, min(1.0, entry.get("confidence", 0.0) + confidence_delta)), 10)
+        previous_interval = entry.get("interval_days", 0)
+        interval = {"incorrect": 1, "partial": 2,
+                    "correct": max(3, previous_interval * 2),
+                    "effortless": max(5, previous_interval * 3)}[quality]
+        try:
+            next_review_at = (occurred + timedelta(days=interval)).isoformat()
+        except (OverflowError, ValueError) as error:
+            raise CourseStateError("invalid_interval", "review date exceeds supported datetime range") from error
+        entry.update(interval_days=interval, last_practiced_at=occurred_at, next_review_at=next_review_at)
+        evidence = entry.setdefault("evidence", [])
+        evidence.append({"attempt_id": attempt_id, "occurred_at": occurred_at, "quality": quality,
+                         **{field: update[field] for field in ("question_id", "misconception_tags", "feedback")
+                            if field in update}})
+        successes = [item for item in evidence if item["quality"] in {"correct", "effortless"}]
+        if quality == "incorrect":
+            entry["status"] = "relearning"
+        elif entry["mastery"] < 0.75:
+            entry["status"] = "learning"
+        elif entry["mastery"] >= 0.90 and len(successes) >= 3 and len({item["attempt_id"] for item in successes}) >= 2:
+            entry["status"] = "mastered"
+        else:
+            entry["status"] = "reviewing"
+    applied.append(attempt_id)
+    if not _validate_course(root, progress_override=progress)["valid"]:
+        raise CourseStateError("invalid_course_state", "resulting progress is invalid", progress_path)
+    atomic_write_json(_owned_path(root, progress_path), progress)
+    changed = list(seen)
+    return {"attempt_id": attempt_id, "changed_knowledge_ids": changed,
+            "next_review_at": {key: progress["knowledge"][key]["next_review_at"] for key in changed}}
 
 
 def next_session(root: Path, now: str) -> dict:

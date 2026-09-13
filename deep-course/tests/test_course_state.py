@@ -108,6 +108,374 @@ class CourseFixture(unittest.TestCase):
         (self.root / name).write_text(json.dumps(value), encoding="utf-8")
 
 
+class AttemptTests(CourseFixture):
+    def attempt(self, **fields):
+        return {"schema_version": 1, "attempt_id": "attempt-new", "lesson_id": "lesson-001",
+                "submitted_at": "2026-09-11T10:00:00+08:00", "responses": [], **fields}
+
+    def test_malformed_attempts_never_change_existing_bytes(self):
+        self.make_course_with_node()
+        course_state.append_attempt(self.root, self.attempt(attempt_id="prior"))
+        path = self.root / "attempts.jsonl"
+        before = path.read_bytes()
+        cases = [self.attempt(schema_version=value) for value in (None, True, 99)]
+        cases += [self.attempt(responses=value) for value in (None, {}, [None], [1])]
+        cases += [self.attempt(lesson_id=""), self.attempt(course_id="wrong"),
+                  self.attempt(feedback=object()), self.attempt(score=float("nan")),
+                  self.attempt(misconception_tags="bad"), {1: "bad"}]
+        cases += [self.attempt(responses=[{"question_id": "q", "knowledge_ids": ["pv"],
+                                          "answer": "1", "quality": value}])
+                  for value in ([], {}, None)]
+        cases += [self.attempt(responses=[{"question_id": "q", "knowledge_ids": value,
+                                          "answer": "1"}]) for value in (None, "pv", [[]])]
+        for attempt in cases:
+            with self.subTest(attempt=attempt):
+                with self.assertRaises(course_state.CourseStateError):
+                    course_state.append_attempt(self.root, attempt)
+                self.assertEqual(before, path.read_bytes())
+
+    def test_append_preserves_record_without_terminal_newline(self):
+        self.make_course_with_node()
+        path = self.root / "attempts.jsonl"
+        original = json.dumps(self.attempt(attempt_id="prior")).encode()
+        path.write_bytes(original)
+        result = course_state.append_attempt(self.root, self.attempt())
+        self.assertEqual(1, result["line_index"])
+        self.assertTrue(path.read_bytes().startswith(original + b"\n"))
+        self.assertEqual(2, len(path.read_bytes().splitlines()))
+        self.assertTrue(course_state.validate_course(self.root)["valid"])
+
+    def make_course_with_node(self, knowledge_id="pv"):
+        curriculum = self.read_json("curriculum.json")
+        curriculum["knowledge_nodes"] = [
+            {
+                "knowledge_id": knowledge_id,
+                "title": "Present value",
+                "prerequisite_ids": [],
+            }
+        ]
+        self.write_json("curriculum.json", curriculum)
+        return self.root
+
+    def test_attempt_is_appended_once(self):
+        root = self.make_course_with_node("pv")
+        attempt = {
+            "schema_version": 1,
+            "attempt_id": "attempt-001",
+            "lesson_id": "lesson-001",
+            "submitted_at": "2026-09-11T10:00:00+08:00",
+            "responses": [
+                {
+                    "question_id": "q1",
+                    "knowledge_ids": ["pv"],
+                    "answer": "900",
+                }
+            ],
+        }
+
+        result = course_state.append_attempt(root, attempt)
+        with self.assertRaisesRegex(course_state.CourseStateError, "duplicate"):
+            course_state.append_attempt(root, attempt)
+
+        self.assertEqual({"attempt_id": "attempt-001", "line_index": 0}, result)
+        self.assertEqual(
+            json.dumps(attempt, ensure_ascii=False, separators=(",", ":")) + "\n",
+            (root / "attempts.jsonl").read_text(encoding="utf-8"),
+        )
+
+    def test_unknown_response_knowledge_id_is_rejected_without_writing(self):
+        root = self.make_course_with_node("pv")
+        attempts_path = root / "attempts.jsonl"
+        before = attempts_path.read_bytes()
+        attempt = {
+            "schema_version": 1,
+            "attempt_id": "attempt-unknown",
+            "lesson_id": "lesson-001",
+            "submitted_at": "2026-09-11T10:00:00+08:00",
+            "responses": [
+                {
+                    "question_id": "q1",
+                    "knowledge_ids": ["unknown"],
+                    "answer": "900",
+                }
+            ],
+        }
+
+        with self.assertRaises(course_state.CourseStateError) as raised:
+            course_state.append_attempt(root, attempt)
+
+        self.assertEqual("unknown_knowledge_id", raised.exception.code)
+        self.assertEqual(before, attempts_path.read_bytes())
+
+    def test_attempt_timestamp_without_offset_is_rejected_without_writing(self):
+        root = self.make_course_with_node("pv")
+        attempts_path = root / "attempts.jsonl"
+        before = attempts_path.read_bytes()
+        attempt = {
+            "schema_version": 1,
+            "attempt_id": "attempt-local-time",
+            "lesson_id": "lesson-001",
+            "submitted_at": "2026-09-11T10:00:00",
+            "responses": [],
+        }
+
+        with self.assertRaises(course_state.CourseStateError) as raised:
+            course_state.append_attempt(root, attempt)
+
+        self.assertEqual("invalid_timestamp", raised.exception.code)
+        self.assertEqual(before, attempts_path.read_bytes())
+
+    def test_invalid_response_quality_is_rejected_without_writing(self):
+        root = self.make_course_with_node("pv")
+        attempts_path = root / "attempts.jsonl"
+        before = attempts_path.read_bytes()
+        attempt = {
+            "schema_version": 1,
+            "attempt_id": "attempt-bad-quality",
+            "lesson_id": "lesson-001",
+            "submitted_at": "2026-09-11T10:00:00+08:00",
+            "responses": [
+                {
+                    "question_id": "q1",
+                    "knowledge_ids": ["pv"],
+                    "answer": "900",
+                    "quality": "excellent",
+                }
+            ],
+        }
+
+        with self.assertRaises(course_state.CourseStateError) as raised:
+            course_state.append_attempt(root, attempt)
+
+        self.assertEqual("invalid_quality", raised.exception.code)
+        self.assertEqual(before, attempts_path.read_bytes())
+
+    def test_caller_supplied_path_fields_are_rejected_without_writing(self):
+        root = self.make_course_with_node("pv")
+        attempts_path = root / "attempts.jsonl"
+        base = {
+            "schema_version": 1,
+            "attempt_id": "attempt-path",
+            "lesson_id": "lesson-001",
+            "submitted_at": "2026-09-11T10:00:00+08:00",
+            "responses": [],
+        }
+        cases = [
+            {**base, "path": "../../outside.json"},
+            {**base, "responses": [{"knowledge_ids": ["pv"], "artifact_path": "x"}]},
+        ]
+
+        for attempt in cases:
+            with self.subTest(attempt=attempt):
+                before = attempts_path.read_bytes()
+                with self.assertRaises(course_state.CourseStateError) as raised:
+                    course_state.append_attempt(root, attempt)
+                self.assertEqual("injected_path_field", raised.exception.code)
+                self.assertEqual(before, attempts_path.read_bytes())
+
+
+class MasteryTests(CourseFixture):
+    def configure_nodes(self, *knowledge_ids):
+        curriculum = self.read_json("curriculum.json")
+        curriculum["knowledge_nodes"] = [
+            {
+                "knowledge_id": knowledge_id,
+                "title": knowledge_id.title(),
+                "prerequisite_ids": [],
+            }
+            for knowledge_id in knowledge_ids
+        ]
+        self.write_json("curriculum.json", curriculum)
+
+    def append_attempt(self, attempt_id, responses=None):
+        course_state.append_attempt(
+            self.root,
+            {
+                "schema_version": 1,
+                "attempt_id": attempt_id,
+                "lesson_id": "lesson-001",
+                "submitted_at": "2026-09-11T10:00:00+08:00",
+                "responses": responses or [],
+            },
+        )
+
+    def test_quality_table_updates_mastery_confidence_status_and_review_time(self):
+        self.configure_nodes("incorrect", "partial", "correct", "effortless")
+        self.append_attempt("attempt-table")
+        progress = self.read_json("progress.json")
+        progress["knowledge"] = {
+            "incorrect": {"mastery": 0.1, "confidence": 0.98, "interval_days": 10},
+            "partial": {"mastery": 0.7, "confidence": 0.98, "interval_days": 10},
+            "correct": {"mastery": 0.5, "confidence": 0.95, "interval_days": 2},
+            "effortless": {"mastery": 0.8, "confidence": 0.95, "interval_days": 2},
+        }
+        self.write_json("progress.json", progress)
+        updates = [
+            {"knowledge_id": quality, "quality": quality}
+            for quality in ("incorrect", "partial", "correct", "effortless")
+        ]
+
+        course_state.apply_mastery_updates(
+            self.root,
+            "attempt-table",
+            updates,
+            "2026-09-11T10:00:00+08:00",
+        )
+
+        entries = self.read_json("progress.json")["knowledge"]
+        expected = {
+            "incorrect": (0.0, 1.0, "relearning", 1, "2026-09-12T10:00:00+08:00"),
+            "partial": (0.75, 1.0, "reviewing", 2, "2026-09-13T10:00:00+08:00"),
+            "correct": (0.65, 1.0, "learning", 4, "2026-09-15T10:00:00+08:00"),
+            "effortless": (1.0, 1.0, "reviewing", 6, "2026-09-17T10:00:00+08:00"),
+        }
+        for knowledge_id, values in expected.items():
+            with self.subTest(knowledge_id=knowledge_id):
+                entry = entries[knowledge_id]
+                self.assertEqual(values[0], entry["mastery"])
+                self.assertEqual(values[1], entry["confidence"])
+                self.assertEqual(values[2], entry["status"])
+                self.assertEqual(values[3], entry["interval_days"])
+                self.assertEqual(values[4], entry["next_review_at"])
+                self.assertEqual("2026-09-11T10:00:00+08:00", entry["last_practiced_at"])
+
+
+    def test_three_successes_in_one_attempt_do_not_establish_mastery(self):
+        self.configure_nodes("pv")
+        progress = self.read_json("progress.json")
+        progress["knowledge"] = {"pv": {"mastery": 0.9}}
+        self.write_json("progress.json", progress)
+        self.append_attempt("a1", [{"question_id": q, "knowledge_ids": ["pv"], "answer": "ok"}
+                                   for q in ("q1", "q2", "q3")])
+        course_state.apply_mastery_updates(self.root, "a1", [
+            {"knowledge_id": "pv", "question_id": q, "quality": "correct"}
+            for q in ("q1", "q2", "q3")], CREATED_AT)
+        self.assertEqual("reviewing", self.read_json("progress.json")["knowledge"]["pv"]["status"])
+
+    def test_third_success_on_second_attempt_can_master(self):
+        self.configure_nodes("pv")
+        progress = self.read_json("progress.json")
+        progress["knowledge"] = {"pv": {"mastery": 0.9}}
+        self.write_json("progress.json", progress)
+        self.append_attempt("a1", [{"question_id": q, "knowledge_ids": ["pv"], "answer": "ok"}
+                                   for q in ("q1", "q2")])
+        course_state.apply_mastery_updates(self.root, "a1", [
+            {"knowledge_id": "pv", "question_id": q, "quality": "effortless"}
+            for q in ("q1", "q2")], CREATED_AT)
+        self.assertEqual("reviewing", self.read_json("progress.json")["knowledge"]["pv"]["status"])
+        self.append_attempt("a2")
+        result = course_state.apply_mastery_updates(self.root, "a2", [
+            {"knowledge_id": "pv", "quality": "correct", "misconception_tags": [],
+             "feedback": "Clear independent explanation."}], "2026-09-12T09:00:00+08:00")
+        entry = self.read_json("progress.json")["knowledge"]["pv"]
+        self.assertEqual("mastered", entry["status"])
+        self.assertEqual(3, len(entry["evidence"]))
+        self.assertEqual(["pv"], result["changed_knowledge_ids"])
+        self.assertEqual(entry["next_review_at"], result["next_review_at"]["pv"])
+        self.assertTrue(course_state.validate_course(self.root)["valid"])
+
+    def test_invalid_updates_leave_progress_unchanged(self):
+        self.configure_nodes("pv")
+        self.append_attempt("a1")
+        good = {"knowledge_id": "pv", "quality": "correct"}
+        invalid = [[], None, [None], [good, {"knowledge_id": "unknown", "quality": "correct"}],
+                   [good, good], [{**good, "quality": []}], [{**good, "quality": "great"}],
+                   [{**good, "question_id": "missing"}], [{**good, "misconception_tags": "bad"}],
+                   [{**good, "feedback": 1}], [{**good, "artifact_path": "outside"}]]
+        path = self.root / "progress.json"
+        before = path.read_bytes()
+        for updates in invalid:
+            with self.subTest(updates=updates):
+                with self.assertRaises(course_state.CourseStateError):
+                    course_state.apply_mastery_updates(self.root, "a1", updates, CREATED_AT)
+                self.assertEqual(before, path.read_bytes())
+        for attempt_id, stamp in [("missing", CREATED_AT), ("a1", "2026-09-11T09:00:00")]:
+            with self.assertRaises(course_state.CourseStateError):
+                course_state.apply_mastery_updates(self.root, attempt_id, [good], stamp)
+            self.assertEqual(before, path.read_bytes())
+        course_state.apply_mastery_updates(self.root, "a1", [good], CREATED_AT)
+        before = path.read_bytes()
+        with self.assertRaisesRegex(course_state.CourseStateError, "already applied"):
+            course_state.apply_mastery_updates(self.root, "a1", [good], CREATED_AT)
+        self.assertEqual(before, path.read_bytes())
+
+    def test_failed_atomic_replace_preserves_progress_and_allows_retry(self):
+        self.configure_nodes("pv")
+        self.append_attempt("a1")
+        before = (self.root / "progress.json").read_bytes()
+        updates = [{"knowledge_id": "pv", "quality": "correct"}]
+        with patch.object(course_state.os, "replace", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                course_state.apply_mastery_updates(self.root, "a1", updates, CREATED_AT)
+        self.assertEqual(before, (self.root / "progress.json").read_bytes())
+        course_state.apply_mastery_updates(self.root, "a1", updates, CREATED_AT)
+        entry = self.read_json("progress.json")["knowledge"]["pv"]
+        self.assertEqual(0.15, entry["mastery"])
+        self.assertEqual(3, entry["interval_days"])
+
+    def test_partial_evidence_never_counts_as_successful_mastery(self):
+        self.configure_nodes("pv")
+        progress = self.read_json("progress.json")
+        progress["knowledge"] = {"pv": {"mastery": 0.9}}
+        self.write_json("progress.json", progress)
+        for index in range(3):
+            self.append_attempt(str(index))
+            course_state.apply_mastery_updates(self.root, str(index),
+                [{"knowledge_id": "pv", "quality": "partial"}], CREATED_AT)
+        self.assertEqual("reviewing", self.read_json("progress.json")["knowledge"]["pv"]["status"])
+
+    def test_invalid_persisted_numeric_or_evidence_state_fails_closed(self):
+        self.configure_nodes("pv")
+        self.append_attempt("a1")
+        original = self.read_json("progress.json")
+        cases = [{"mastery": value} for value in (-0.1, 1.1, True, "0.5", float("nan"), 10**400)]
+        cases += [{"confidence": 2}, {"interval_days": -1}, {"interval_days": []},
+                  {"interval_days": True}, {"evidence": [None]}, {"evidence": "bad"}]
+        for entry in cases:
+            with self.subTest(entry=entry):
+                self.write_json("progress.json", {**original, "knowledge": {"pv": entry}})
+                before = (self.root / "progress.json").read_bytes()
+                self.assertFalse(course_state.validate_course(self.root)["valid"])
+                with self.assertRaises(course_state.CourseStateError):
+                    course_state.apply_mastery_updates(self.root, "a1",
+                        [{"knowledge_id": "pv", "quality": "correct"}], CREATED_AT)
+                self.assertEqual(before, (self.root / "progress.json").read_bytes())
+
+    def test_persisted_evidence_must_reference_recorded_applied_attempts(self):
+        self.configure_nodes("pv")
+        self.append_attempt("a1")
+        course_state.apply_mastery_updates(self.root, "a1", [{"knowledge_id": "pv", "quality": "correct"}], CREATED_AT)
+        original = self.read_json("progress.json")
+        for mutation in ("unknown_application", "unknown_evidence", "missing_application", "duplicate_evidence"):
+            progress = json.loads(json.dumps(original))
+            if mutation == "unknown_application":
+                progress["applied_attempt_ids"].append("missing")
+            elif mutation == "unknown_evidence":
+                progress["knowledge"]["pv"]["evidence"][0]["attempt_id"] = "missing"
+            elif mutation == "missing_application":
+                progress["applied_attempt_ids"] = []
+            else:
+                progress["knowledge"]["pv"]["evidence"] *= 2
+            self.write_json("progress.json", progress)
+            with self.subTest(mutation=mutation):
+                self.assertFalse(course_state.validate_course(self.root)["valid"])
+
+    def test_review_minimum_and_old_or_overflowing_evidence(self):
+        self.configure_nodes("pv")
+        self.append_attempt("a1")
+        updates = [{"knowledge_id": "pv", "quality": "effortless"}]
+        course_state.apply_mastery_updates(self.root, "a1", updates, CREATED_AT)
+        entry = self.read_json("progress.json")["knowledge"]["pv"]
+        self.assertEqual(5, entry["interval_days"])
+        self.assertEqual("2026-09-16T09:00:00+08:00", entry["next_review_at"])
+        self.append_attempt("a2")
+        before = (self.root / "progress.json").read_bytes()
+        for stamp in ("2026-09-10T09:00:00+08:00", "9999-12-31T09:00:00+08:00"):
+            with self.assertRaises(course_state.CourseStateError):
+                course_state.apply_mastery_updates(self.root, "a2", updates, stamp)
+            self.assertEqual(before, (self.root / "progress.json").read_bytes())
+
+
 class ValidationTests(CourseFixture):
     def error_codes(self):
         return {error["code"] for error in course_state.validate_course(self.root)["errors"]}
