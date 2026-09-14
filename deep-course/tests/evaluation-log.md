@@ -69,3 +69,16 @@ Short verbatim rationalizations:
 All fourteen observable decisions from the three scenario files appear once in the tables above: A1–A4, B1–B5, and C1–C5.
 
 The independent assessment is also RED and explicitly identifies C3. For Scenario A, that assessment substituted an expert/release-gate decision for the scenario’s actual learner-approval decision. This log follows the source scenario: technical sign-off is not learner approval, so A2 is recorded as an additional baseline failure.
+
+## Task 5: Interactive lesson shell inspection
+
+- Date: 2026-09-14; browser: installed Chrome 152.0.7977.83 on Windows, isolated headless profile.
+- Tool limitation: CUA and Node REPL could not initialize because the Windows sandbox helper reported `helper_unknown_error: setup refresh had errors`. The approved fallback used the installed Chrome browser and its debugging protocol through Node 24 standard-library APIs. This was a real browser render and input session; native print-dialog UI was not inspected.
+- Desktop (1280 × 900): inspected the rendered lesson, readable typography, navigation, completion progress, retrieval field and clear focus ring. No external assets are required.
+- Keyboard: Tab reached the visible skip link; Enter moved focus to main; Tab reached the textarea and radio group; Space selected the first option and ArrowDown selected the second. Authored feedback was hidden initially and appeared immediately for each selection. Focus remained visible.
+- Responses and download: entered an open explanation by keyboard and selected an objective option. Progress became 2 of 4, explicitly labelled completion rather than mastery. Clicking Download responses created the actual `deep-course-response-v1.json` file through Blob/object URL. Its two answers matched the controls; omitted questions were absent. Open responses carry no automatic semantic grade.
+- Narrow (390 × 844): visually inspected the header, navigation and objective feedback; browser layout reported no horizontal overflow. The first inspection exposed crowded list markers; the corrected two-column navigation was re-rendered and inspected.
+- Print: used Chrome print media and its PDF print renderer, then rendered and visually inspected every page of the final three-page output. Navigation/actions are hidden, entered prose is visible in full, unfilled responses have writing space, selected choices and revealed explanations remain visible, and no clipping was found. Fixed an orphaned section label and reduced excess print spacing during inspection.
+- Reduced motion: emulated the reduced-motion preference; the browser confirmed the media query and the page does not depend on animations.
+- Automated contracts: seven tests parse the actual HTML/data, execute the embedded JavaScript using Node's standard-library VM, exercise the JSON Blob download boundary, reject duplicate/unsafe question IDs and unknown options, and pass the generated payload directly to `append_attempt` while checking unchanged progress bytes.
+- Local inspection artifacts and repeatable inspection script: `.superpowers/sdd/2026-09-11-deep-course-v1/task-5-browser.mjs`, `task-5-desktop.png`, `task-5-narrow.png`, `task-5-narrow-feedback.png`, `task-5-browser-export.json`, `task-5-print.pdf`, and `task-5-print-final-1.png` through `task-5-print-final-3.png` (ignored working records).

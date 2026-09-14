@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>From memory to understanding · Deep Course</title>
+<style>
+:root { color-scheme: light; --ink:#182e36; --muted:#52656c; --paper:#fffefa; --accent:#17665e; --line:#d5dfda; }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--ink); background:#edf1ed; font:17px/1.65 system-ui,sans-serif; }
+a { color:var(--accent); text-underline-offset:.2em; }
+:focus-visible { outline:3px solid #b45015; outline-offset:4px; }
+.skip { position:absolute; top:-5rem; left:1rem; padding:.6rem; background:white; z-index:2; }
+.skip:focus { top:1rem; }
+.layout { display:grid; grid-template-columns:15rem minmax(0,48rem); gap:3rem; max-width:72rem; margin:auto; padding:2.5rem 2rem; }
+aside { align-self:start; position:sticky; top:2rem; }
+.brand,.eyebrow { font-size:.75rem; letter-spacing:.14em; text-transform:uppercase; font-weight:750; color:var(--accent); }
+nav ol { padding-left:1.35rem; } nav li { margin:.7rem 0; } nav a { text-decoration:none; }
+progress { width:100%; accent-color:var(--accent); } .small { font-size:.88rem; color:var(--muted); }
+main { min-width:0; background:var(--paper); padding:2.7rem; border:1px solid var(--line); border-radius:1rem; }
+h1,h2,h3 { line-height:1.2; letter-spacing:-.025em; } h1 { font:700 clamp(2rem,5vw,3.25rem)/1.1 Georgia,serif; margin:.8rem 0 1.2rem; }
+h2 { font-size:1.55rem; margin-top:0; } h3 { font-size:1.1rem; }
+header { padding-bottom:2rem; } section { border-top:1px solid var(--line); padding:2rem 0 .8rem; scroll-margin-top:1rem; }
+.lead { color:var(--muted); font-size:1.1rem; } .card,fieldset { background:#f3f6f1; border:1px solid var(--line); border-radius:.65rem; padding:1.3rem; margin:1.3rem 0; min-width:0; }
+legend { font-weight:650; padding:0 .3rem; } label { cursor:pointer; } .option { display:flex; gap:.75rem; align-items:baseline; padding:.65rem; margin:.4rem 0; background:var(--paper); border:1px solid var(--line); border-radius:.35rem; }
+input { accent-color:var(--accent); } textarea { display:block; width:100%; min-height:7rem; resize:vertical; border:1px solid #8c9e97; border-radius:.35rem; font:inherit; padding:.7rem; background:white; color:var(--ink); margin-top:.7rem; }
+.feedback { border-left:3px solid var(--accent); padding:.7rem 1rem; background:#e4eee6; overflow-wrap:anywhere; }
+table { border-collapse:collapse; width:100%; font-size:.94rem; } th,td { text-align:left; padding:.7rem; border-bottom:1px solid var(--line); } caption { text-align:left; font-weight:650; margin-bottom:.75rem; }
+button { font:inherit; border:0; border-radius:.4rem; background:var(--accent); color:white; padding:.75rem 1rem; cursor:pointer; } button:disabled { opacity:.55; cursor:default; }
+.actions { display:flex; gap:.7rem; flex-wrap:wrap; } .secondary { color:var(--accent); background:#e4eee6; }
+.print-answer { display:none; white-space:pre-wrap; overflow-wrap:anywhere; }
+[hidden] { display:none !important; }
+@media (max-width:760px) { .layout { display:block; padding:1rem; } aside { position:static; margin-bottom:1.5rem; } nav ol { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.6rem 1rem; padding:0; list-style-position:inside; } nav li { margin:0; } main { padding:1.5rem; } }
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; scroll-behavior:auto !important; } }
+@media print { @page { margin:16mm; } body,main { background:white; color:black; font-size:11pt; } .layout { display:block; padding:0; max-width:none; } aside,.skip,.actions,#export-status { display:none; } main { border:0; padding:0; } header { padding-bottom:1rem; } section { break-inside:auto; padding:1rem 0 .5rem; } h2,h3,legend,.eyebrow { break-after:avoid; } fieldset,table,.card { break-inside:avoid; } fieldset,.card { margin:.8rem 0; padding:1rem; } :focus-visible { outline:none; } textarea { display:none; } .print-answer { display:block; min-height:4em; border-bottom:1px solid #777; } a { color:black; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#lesson">Skip to lesson</a>
+<div class="layout">
+<aside>
+<p class="brand">Deep Course / Lesson 01</p>
+<nav aria-label="Lesson sections"><ol>
+<li><a href="#retrieval">Retrieve</a></li><li><a href="#concepts">Understand</a></li>
+<li><a href="#visual">Inspect the evidence</a></li><li><a href="#case">Apply to a case</a></li>
+<li><a href="#exercises">Practice</a></li><li><a href="#recall">Recall &amp; export</a></li>
+</ol></nav>
+<label for="completion">Responses captured</label>
+<progress id="completion" value="0" max="4">0 of 4</progress>
+<p id="progress-text" class="small" aria-live="polite">0 of 4 answered. This is completion, not mastery.</p>
+</aside>
+<main id="lesson" tabindex="-1">
+<header><p class="eyebrow">Learning how to learn · 15 minutes</p>
+<h1 id="lesson-title">From memory to understanding</h1>
+<p class="lead" id="lesson-summary">Practice retrieving an idea, then use feedback to improve your explanation.</p>
+<p>By the end, explain the difference between recognition and retrieval, and design a short retrieval practice.</p>
+<p class="small">Example lesson shell. Authors replace the content sections and embedded lesson data together. Your answers remain in this tab until you download them; refreshing closes that unsaved work.</p></header>
+<noscript><p>JavaScript is required for interactive questions and export. You can still read and print this lesson.</p></noscript>
+<p id="lesson-error" role="alert" hidden></p>
+<section id="retrieval"><p class="eyebrow">01 / Before reading</p><h2>Start with what you remember</h2><p>Without checking notes, put your current understanding into words. Uncertainty is useful evidence.</p><div data-questions="retrieval"></div></section>
+<section id="concepts"><p class="eyebrow">02 / Core idea</p><h2>Familiarity is a starting point</h2><p>Recognition happens when an idea looks familiar with the source in front of you. Retrieval asks you to produce that idea when the source is absent. Those are different tasks.</p><div class="card"><h3>A practical loop</h3><p>Close the source. Explain the idea. Compare your explanation with the source. Correct one specific gap. Try again later.</p></div></section>
+<section id="visual"><p class="eyebrow">03 / Visual &amp; data slot</p><h2>Make the difference visible</h2><table><caption>Two activities, different evidence</caption><thead><tr><th scope="col">Activity</th><th scope="col">What you can observe</th></tr></thead><tbody><tr><th scope="row">Reread a definition</th><td>Does the wording feel familiar?</td></tr><tr><th scope="row">Explain with notes closed</th><td>Which parts can you produce yourself?</td></tr></tbody></table><p class="small">Illustrative comparison, not experimental results. Replace this slot with an accessible figure or sourced data when teaching a specific domain.</p></section>
+<section id="case"><p class="eyebrow">04 / Case slot</p><h2>A familiar page, a missing explanation</h2><p>Alex rereads a page and recognizes every sentence. In a meeting the next day, Alex cannot explain the central idea without opening the page.</p><p>Which practice would expose that gap before the meeting? Consider what evidence each activity produces.</p></section>
+<section id="exercises"><p class="eyebrow">05 / Practice</p><h2>Choose, explain, refine</h2><p>Choices receive immediate feedback. Written explanations are exported for Codex to assess later.</p><div data-questions="exercises"></div></section>
+<section id="recall"><p class="eyebrow">06 / Close the loop</p><h2>One last retrieval</h2><p>Look away from the concept section before answering. Try retrieving the idea again in a later session.</p><div data-questions="recall"></div>
+<div class="actions"><button id="export" type="button" disabled>Download responses</button><button id="print" class="secondary" type="button">Print lesson</button></div>
+<p id="export-status" role="status" aria-live="polite">Download your responses, then give the file to Codex for assessment. No course progress is saved by this page.</p></section>
+</main></div>
+<!-- Authoring contract: safe unique question/option IDs; open or objective types;
+     sections retrieval/exercises/recall; knowledge_ids must exist in the course.
+     Escape any '<' in embedded JSON as \u003c (including in authored feedback).
+     Export includes attempt_id/submitted_at for direct append_attempt ingestion. -->
+<script type="application/json" id="lesson-data">
+{
+  "schema_version": 1,
+  "course_id": "learning-practice",
+  "lesson_id": "lesson-001",
+  "title": "From memory to understanding",
+  "summary": "Practice retrieving an idea, then use feedback to improve your explanation.",
+  "questions": [
+    {"question_id":"before-reading","knowledge_ids":["retrieval"],"type":"open","section":"retrieval","prompt":"What is the difference between recognizing an idea and recalling it?"},
+    {"question_id":"choose-practice","knowledge_ids":["retrieval"],"type":"objective","section":"exercises","prompt":"Which activity best reveals whether Alex can retrieve the idea?","options":[
+      {"value":"reread","label":"Reread the page once more","feedback":"Rereading keeps the source available. It can help you study, but does not show whether you can produce the explanation without it."},
+      {"value":"explain","label":"Close the page and explain the idea","feedback":"Yes. Explaining with the page closed makes gaps in retrieval visible. Reopen the source afterward to check and correct the explanation."}
+    ]},
+    {"question_id":"design-practice","knowledge_ids":["retrieval"],"type":"open","section":"exercises","prompt":"Design a two-minute practice for Alex. What will Alex do, and how will Alex check the result?"},
+    {"question_id":"final-recall","knowledge_ids":["retrieval"],"type":"open","section":"recall","prompt":"From memory, state the practice loop and explain why the checking step matters."}
+  ]
+}
+</script>
+<script id="lesson-core">
+"use strict";
+globalThis.Lesson = (() => {
+  const nonempty = value => typeof value === "string" && value.trim().length > 0;
+  const safeId = value => typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(value);
+  function validate(data) {
+    if (!data || data.schema_version !== 1 || !nonempty(data.course_id) || !nonempty(data.lesson_id) || !Array.isArray(data.questions) || !data.questions.length) throw Error("Invalid lesson metadata.");
+    const seen = new Set();
+    for (const q of data.questions) {
+      if (!safeId(q.question_id) || seen.has(q.question_id)) throw Error("Question IDs must be safe, nonempty and unique.");
+      seen.add(q.question_id);
+      if (!["open","objective"].includes(q.type) || !["retrieval","exercises","recall"].includes(q.section) || !nonempty(q.prompt) || !Array.isArray(q.knowledge_ids) || !q.knowledge_ids.every(nonempty)) throw Error("Invalid question data.");
+      if (q.type === "objective") {
+        if (!Array.isArray(q.options) || q.options.length < 2) throw Error("Objective questions need options.");
+        const values = new Set();
+        for (const option of q.options) {
+          if (!safeId(option.value) || values.has(option.value) || !nonempty(option.label) || !nonempty(option.feedback)) throw Error("Every unique option needs a label and feedback.");
+          values.add(option.value);
+        }
+      }
+    }
+    return true;
+  }
+  function feedback(question, answer) {
+    if (question.type !== "objective") return null;
+    const option = question.options.find(option => option.value === answer);
+    if (!option) throw Error("Unknown objective answer.");
+    return option.feedback;
+  }
+  function buildResponse(data, answers, timestamp, attemptId) {
+    validate(data);
+    if (!nonempty(attemptId) || !nonempty(timestamp) || !/(Z|[+-]\d{2}:\d{2})$/.test(timestamp) || !Number.isFinite(Date.parse(timestamp))) throw Error("Invalid export identity or timestamp.");
+    const responses = [];
+    for (const question of data.questions) {
+      const answer = Object.hasOwn(answers, question.question_id) ? answers[question.question_id] : "";
+      if (answer === undefined || answer === null || answer === "" || (typeof answer === "string" && !answer.trim())) continue;
+      if (typeof answer !== "string") throw Error("Answers must be text.");
+      if (question.type === "objective") feedback(question, answer);
+      responses.push({question_id:question.question_id, knowledge_ids:[...question.knowledge_ids], answer});
+    }
+    return {schema_version:1, course_id:data.course_id, lesson_id:data.lesson_id, attempt_id:attemptId, submitted_at:timestamp, exported_at:timestamp, responses};
+  }
+  function downloadResponse(payload) {
+    const blob = new Blob([JSON.stringify(payload,null,2) + "\n"], {type:"application/json"});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "deep-course-response-v1.json";
+    try {
+      document.body.append(link);
+      link.click();
+    } finally {
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url),10000);
+    }
+  }
+  return {validate, feedback, buildResponse, downloadResponse};
+})();
+</script>
+<script id="lesson-ui">
+"use strict";
+(() => {
+  const exportButton = document.getElementById("export");
+  const answers = Object.create(null);
+  const make = (tag, text) => { const element = document.createElement(tag); if (text !== undefined) element.textContent = text; return element; };
+  try {
+    const data = JSON.parse(document.getElementById("lesson-data").textContent);
+    Lesson.validate(data);
+    document.getElementById("lesson-title").textContent = data.title || data.lesson_id;
+    document.title = (data.title || data.lesson_id) + " · Deep Course";
+    document.getElementById("lesson-summary").textContent = data.summary || "";
+    const progress = document.getElementById("completion");
+    progress.max = data.questions.length;
+    function updateProgress() {
+      const count = Object.values(answers).filter(value => value.trim()).length;
+      progress.value = count;
+      progress.textContent = `${count} of ${data.questions.length}`;
+      document.getElementById("progress-text").textContent = `${count} of ${data.questions.length} answered. This is completion, not mastery.`;
+      exportButton.disabled = count === 0;
+    }
+    for (const q of data.questions) {
+      const fieldset = make("fieldset");
+      fieldset.append(make("legend", q.prompt));
+      const inputId = `answer-${q.question_id}`;
+      if (q.type === "open") {
+        const label = make("label", "Your explanation (assessed later by Codex)");
+        label.htmlFor = inputId;
+        const input = make("textarea"); input.id = inputId; input.name = q.question_id;
+        const printed = make("p", "Written response: ____________________"); printed.className = "print-answer";
+        input.addEventListener("input", () => { answers[q.question_id] = input.value; printed.textContent = input.value || "Written response: ____________________"; updateProgress(); });
+        fieldset.append(label,input,printed);
+      } else {
+        const explanation = make("p"); explanation.id = `feedback-${q.question_id}`; explanation.className = "feedback"; explanation.hidden = true; explanation.setAttribute("aria-live","polite");
+        for (const option of q.options) {
+          const label = make("label"); label.className = "option";
+          const input = make("input"); input.type = "radio"; input.name = q.question_id; input.value = option.value; input.id = `${inputId}-${option.value}`;
+          input.setAttribute("aria-describedby", explanation.id);
+          input.addEventListener("change", () => { answers[q.question_id] = input.value; explanation.hidden = false; explanation.textContent = Lesson.feedback(q,input.value); updateProgress(); });
+          label.append(input,make("span",option.label)); fieldset.append(label);
+        }
+        fieldset.append(explanation);
+      }
+      document.querySelector(`[data-questions="${q.section}"]`).append(fieldset);
+    }
+    updateProgress();
+    exportButton.addEventListener("click", () => {
+      const status = document.getElementById("export-status");
+      try {
+        const timestamp = new Date().toISOString();
+        const bytes = new Uint32Array(4); crypto.getRandomValues(bytes);
+        const attemptId = `attempt-${Array.from(bytes, value => value.toString(16).padStart(8,"0")).join("")}`;
+        const payload = Lesson.buildResponse(data,answers,timestamp,attemptId);
+        Lesson.downloadResponse(payload);
+        status.textContent = `Download requested: ${payload.responses.length} of ${data.questions.length} responses. Give deep-course-response-v1.json to Codex for assessment. Course progress has not been updated.`;
+      } catch (error) { status.textContent = "Export failed. Keep this tab open and copy your responses before closing. " + error.message; }
+    });
+  } catch (error) {
+    const notice = document.getElementById("lesson-error"); notice.hidden = false; notice.textContent = "This lesson's question data could not be loaded. " + error.message;
+    exportButton.disabled = true;
+  }
+  document.getElementById("print").addEventListener("click", () => window.print());
+})();
+</script>
+</body>
+</html>
