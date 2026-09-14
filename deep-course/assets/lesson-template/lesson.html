@@ -168,10 +168,10 @@ globalThis.Lesson = (() => {
       document.getElementById("progress-text").textContent = `${count} of ${data.questions.length} answered. This is completion, not mastery.`;
       exportButton.disabled = count === 0;
     }
-    for (const q of data.questions) {
+    for (const [questionIndex, q] of data.questions.entries()) {
       const fieldset = make("fieldset");
       fieldset.append(make("legend", q.prompt));
-      const inputId = `answer-${q.question_id}`;
+      const inputId = `answer-text-${questionIndex}`;
       if (q.type === "open") {
         const label = make("label", "Your explanation (assessed later by Codex)");
         label.htmlFor = inputId;
@@ -180,10 +180,10 @@ globalThis.Lesson = (() => {
         input.addEventListener("input", () => { answers[q.question_id] = input.value; printed.textContent = input.value || "Written response: ____________________"; updateProgress(); });
         fieldset.append(label,input,printed);
       } else {
-        const explanation = make("p"); explanation.id = `feedback-${q.question_id}`; explanation.className = "feedback"; explanation.hidden = true; explanation.setAttribute("aria-live","polite");
-        for (const option of q.options) {
+        const explanation = make("p"); explanation.id = `feedback-${questionIndex}`; explanation.className = "feedback"; explanation.hidden = true; explanation.setAttribute("aria-live","polite");
+        for (const [optionIndex, option] of q.options.entries()) {
           const label = make("label"); label.className = "option";
-          const input = make("input"); input.type = "radio"; input.name = q.question_id; input.value = option.value; input.id = `${inputId}-${option.value}`;
+          const input = make("input"); input.type = "radio"; input.name = q.question_id; input.value = option.value; input.id = `answer-choice-${questionIndex}-${optionIndex}`;
           input.setAttribute("aria-describedby", explanation.id);
           input.addEventListener("change", () => { answers[q.question_id] = input.value; explanation.hidden = false; explanation.textContent = Lesson.feedback(q,input.value); updateProgress(); });
           label.append(input,make("span",option.label)); fieldset.append(label);

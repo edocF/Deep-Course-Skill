@@ -142,6 +142,53 @@ class LessonTemplateTests(unittest.TestCase):
         for effect in ("clicked", "removed", "appended", "revoked"):
             self.assertTrue(result[effect], effect)
 
+    def test_rendered_controls_keep_distinct_ids_and_correct_label_targets(self):
+        # Accepted IDs used to collide across both control types and options.
+        objective = next(q for q in self.data["questions"] if q["type"] == "objective")
+        objective["question_id"] = "practice"
+        objective["options"][0]["value"] = "reason"
+        objective["options"][1]["value"] = "more-reason"
+        open_question = next(q for q in self.data["questions"] if q["type"] == "open")
+        open_question.update(question_id="practice-reason", section="exercises")
+        other = json.loads(json.dumps(objective))
+        other["question_id"] = "practice-more"
+        other["options"][1]["value"] = "other"
+        self.data["questions"] = [objective, open_question, other]
+        # Only the DOM boundary is simulated; rendering and handlers are the
+        # production scripts. ID lookup uses first-match document semantics.
+        setup = """
+            const elements=[];
+            class Element {
+                constructor(tag){this.tag=tag;this.children=[];this.attributes={};this.listeners={};this.value='';elements.push(this)}
+                append(...children){this.children.push(...children)}
+                setAttribute(name,value){this.attributes[name]=value}
+                addEventListener(name,handler){this.listeners[name]=handler}
+                get control(){return this.htmlFor ? elements.find(e=>e.id===this.htmlFor) : this.children.find(e=>['input','textarea'].includes(e.tag))}
+                click(){if(this.tag==='label')ctx.document.activeElement=this.control;this.listeners.click?.()}
+                remove(){}
+            }
+            ctx.document={createElement:tag=>new Element(tag),getElementById:id=>elements.find(e=>e.id===id),querySelector:selector=>elements.find(e=>selector===`[data-questions="${e.attributes['data-questions']}"]`)};
+        """
+        setup += "for(const [tag,attributes] of " + json.dumps(self.html.elements) + ") {const element=new Element(tag);Object.assign(element.attributes,attributes);if(attributes.id)element.id=attributes.id;}"
+        setup += "ctx.document.getElementById('lesson-data').textContent=JSON.stringify(data);"
+        setup += "vm.runInContext(" + json.dumps(self.html.scripts["lesson-ui"]) + ",ctx);"
+        result = self.run_js(setup + """
+            const controls=elements.filter(e=>['input','textarea'].includes(e.tag));
+            const labels=elements.filter(e=>e.tag==='label' && e.control && controls.includes(e.control));
+            const openLabel=labels.find(e=>e.htmlFor);
+            openLabel.click();
+            const ids=elements.filter(e=>e.id).map(e=>e.id);
+            console.log(JSON.stringify({valid:api.validate(data),ids,controls:controls.map(e=>({tag:e.tag,id:e.id,name:e.name})),labelTargets:labels.map(e=>e.control.name),focusedTag:ctx.document.activeElement.tag,focusedName:ctx.document.activeElement.name,error:ctx.document.getElementById('lesson-error').textContent||''}));
+        """)
+        self.assertTrue(result["valid"])
+        self.assertEqual("", result["error"])
+        with self.subTest(contract="unique IDs across every rendered element"):
+            self.assertEqual(len(result["ids"]), len(set(result["ids"])), result["controls"])
+        with self.subTest(contract="open label activates its textarea"):
+            self.assertEqual(("textarea", "practice-reason"), (result["focusedTag"], result["focusedName"]))
+        with self.subTest(contract="all labels identify their intended controls"):
+            self.assertEqual(["practice", "practice", "practice-reason", "practice-more", "practice-more"], result["labelTargets"])
+
 
 if __name__ == "__main__":
     unittest.main()
