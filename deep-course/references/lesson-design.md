@@ -140,6 +140,22 @@ The legal transitions are `draft -> ready -> delivered -> assessed`:
   Each ID must already exist in attempts.jsonl and refer to this lesson. Record
   the attempt and apply evidence using the assessment reference first.
 
+The ready boundary freezes the lesson's identity and teaching content. From
+ready onward, `schema_version`, `course_id`, `lesson_id`, `lesson_directory`,
+`learning_objectives`, and the complete artifact path/hash list are immutable.
+A ready-to-delivered transition may add only `status` and `delivered_at`; a
+delivered-to-assessed transition may change `status` and add `attempt_ids`,
+while preserving `delivered_at`. Revise teaching content under a new lesson ID
+and directory rather than attaching an assessment to altered material.
+
+Before accepting any candidate, the script validates every persisted
+lessons/*/state.json manifest, including its status-specific metadata and the
+bytes of all listed artifacts. Corrupted authoritative lesson state blocks all
+lesson recording without replacing a manifest. The one exception is artifact
+integrity for the same draft being completed into ready: draft artifacts may be
+edited during generation, so the complete ready candidate becomes the new
+integrity boundary after its own hashes are checked.
+
 An unchanged normalized manifest is an idempotent replay, including a file
 integrity check; changed same-state, skipped, and backward transitions fail.
 This v1 API therefore supports completing a draft in the draft-to-ready call,

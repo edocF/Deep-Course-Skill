@@ -693,6 +693,51 @@ class LessonLifecycleTests(CourseFixture):
         self.assertEqual(assessed, course_state.record_lesson(self.root, assessed))
         self.assertEqual(assessed, course_state.record_lesson(self.root, assessed))
 
+    def test_delivered_to_assessed_rejects_rewritten_teaching_content(self):
+        delivered = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, delivered)
+        course_state.append_attempt(
+            self.root,
+            {
+                "schema_version": 1,
+                "attempt_id": "attempt-001",
+                "lesson_id": "lesson-001",
+                "submitted_at": CREATED_AT,
+                "responses": [],
+            },
+        )
+        assessed = {**delivered, "status": "assessed", "attempt_ids": ["attempt-001"]}
+        lesson_path = self.root / "lessons/001-topic/lesson.md"
+        appendix_path = self.root / "lessons/001-topic/appendix.md"
+        cases = {
+            "learning objectives": (
+                {**assessed, "learning_objectives": ["A revised objective"]},
+                "invalid_lesson_transition",
+            ),
+            "artifact content and hash": (assessed, "invalid_lesson_state"),
+            "artifact path set": (assessed, "invalid_lesson_transition"),
+        }
+        for mutation, (candidate, code) in cases.items():
+            lesson_path.write_text("lesson content", encoding="utf-8")
+            appendix_path.unlink(missing_ok=True)
+            self.state_path().write_text(json.dumps(delivered), encoding="utf-8")
+            candidate = json.loads(json.dumps(candidate))
+            if mutation == "artifact content and hash":
+                lesson_path.write_text("revised after delivery", encoding="utf-8")
+                for artifact in candidate["artifacts"]:
+                    if artifact["path"].endswith("/lesson.md"):
+                        artifact["sha256"] = hashlib.sha256(lesson_path.read_bytes()).hexdigest()
+            elif mutation == "artifact path set":
+                appendix_path.write_text("new material", encoding="utf-8")
+                candidate["artifacts"].append(
+                    {
+                        "path": "lessons/001-topic/appendix.md",
+                        "sha256": hashlib.sha256(appendix_path.read_bytes()).hexdigest(),
+                    }
+                )
+            with self.subTest(mutation=mutation):
+                self.assert_rejected_unchanged(candidate, code)
+
     def test_replacement_failure_keeps_bytes_and_cleans_temporary_file(self):
         manifest = self.manifest()
         course_state.record_lesson(self.root, manifest)
@@ -743,6 +788,30 @@ class LessonLifecycleTests(CourseFixture):
         corrupted = {key: value for key, value in manifest.items() if key != "delivered_at"}
         self.state_path().write_text(json.dumps(corrupted), encoding="utf-8")
         self.assert_rejected_unchanged({**manifest, "status": "assessed", "attempt_ids": ["missing"]})
+
+    def test_corrupted_persisted_ready_state_blocks_another_lesson_recording(self):
+        ready = self.ready()
+        corrupted = {**ready, "learning_objectives": [], "artifacts": []}
+        self.state_path().write_text(json.dumps(corrupted), encoding="utf-8")
+
+        candidate = self.manifest("lessons/002-other", lesson_id="lesson-002")
+        self.assert_rejected_unchanged(candidate, "invalid_lesson_state")
+
+    def test_corrupted_persisted_delivered_state_blocks_another_lesson_recording(self):
+        delivered = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, delivered)
+        corrupted = {key: value for key, value in delivered.items() if key != "delivered_at"}
+        self.state_path().write_text(json.dumps(corrupted), encoding="utf-8")
+
+        candidate = self.manifest("lessons/002-other", lesson_id="lesson-002")
+        self.assert_rejected_unchanged(candidate, "invalid_lesson_state")
+
+    def test_tampered_persisted_ready_artifact_blocks_another_lesson_recording(self):
+        self.ready()
+        (self.root / "lessons/001-topic/lesson.md").write_text("tampered", encoding="utf-8")
+
+        candidate = self.manifest("lessons/002-other", lesson_id="lesson-002")
+        self.assert_rejected_unchanged(candidate, "invalid_lesson_state")
 
 
 class ValidationTests(CourseFixture):

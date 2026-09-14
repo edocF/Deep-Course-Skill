@@ -28,6 +28,14 @@ KNOWLEDGE_STATUSES = {"unseen", "learning", "relearning", "reviewing", "mastered
 EVIDENCE_QUALITIES = {"incorrect", "partial", "correct", "effortless"}
 LESSON_STATUSES = ("draft", "ready", "delivered", "assessed")
 CORE_ARTIFACTS = {"lesson.html", "lesson.md", "exercises.md", "answers.md", "sources.md", "state.json"}
+LESSON_CONTENT_FIELDS = (
+    "schema_version",
+    "course_id",
+    "lesson_id",
+    "lesson_directory",
+    "learning_objectives",
+    "artifacts",
+)
 STATE_FILES = (
     "course.json",
     "learner-profile.json",
@@ -1002,6 +1010,36 @@ def _check_lesson_artifacts(root: Path, manifest: dict) -> None:
             raise CourseStateError("artifact_hash_mismatch", f"sha256 mismatch for {item['path']}", path)
 
 
+def _check_persisted_lesson(root: Path, manifest: dict, *, check_artifacts: bool) -> None:
+    """Validate authoritative lesson state before it can authorize a write."""
+
+    status = manifest["status"]
+    if status in {"delivered", "assessed"}:
+        if _timestamp(manifest.get("delivered_at")) is None:
+            raise CourseStateError("invalid_timestamp", "delivered_at requires an explicit timezone offset")
+    elif "delivered_at" in manifest:
+        raise CourseStateError("invalid_field", "delivered_at is valid only after delivery")
+    if status == "assessed":
+        ids = manifest.get("attempt_ids")
+        if (not isinstance(ids, list) or not ids or not all(isinstance(item, str) and item for item in ids)
+                or len(ids) != len(set(ids))):
+            raise CourseStateError("invalid_field", "assessed lessons require unique nonempty attempt_ids")
+        errors: list[dict] = []
+        attempts = _read_attempts(root, root / "attempts.jsonl", errors)
+        if errors:
+            raise CourseStateError("invalid_course_state", "cannot read attempts")
+        recorded = {item.get("attempt_id"): item for _, item in attempts if isinstance(item.get("attempt_id"), str)}
+        for attempt_id in ids:
+            if attempt_id not in recorded:
+                raise CourseStateError("unknown_attempt_id", "assessed lesson references missing attempt")
+            if recorded[attempt_id].get("lesson_id") != manifest["lesson_id"]:
+                raise CourseStateError("attempt_lesson_mismatch", "attempt belongs to another lesson")
+    elif "attempt_ids" in manifest:
+        raise CourseStateError("invalid_field", "attempt_ids is valid only for assessed lessons")
+    if check_artifacts:
+        _check_lesson_artifacts(root, manifest)
+
+
 def record_lesson(root: Path, manifest: dict) -> dict:
     """Validate lesson files and atomically advance state.json, under one writer.
 
@@ -1036,6 +1074,22 @@ def record_lesson(root: Path, manifest: dict) -> dict:
         existing = _lesson_manifest_shape(root, existing, course["course_id"])
         if existing["lesson_directory"] != child.relative_to(root).as_posix():
             raise CourseStateError("invalid_lesson_state", "stored lesson directory differs from its location", existing_path)
+        completing_this_draft = (
+            existing["status"] == "draft"
+            and candidate["status"] == "ready"
+            and existing["lesson_id"] == candidate["lesson_id"]
+            and existing["lesson_directory"] == directory
+        )
+        try:
+            _check_persisted_lesson(root, existing, check_artifacts=not completing_this_draft)
+        except CourseStateError as error:
+            if existing == candidate:
+                raise
+            raise CourseStateError(
+                "invalid_lesson_state",
+                f"stored lesson state failed validation: {error.code}",
+                existing_path,
+            ) from error
         if existing["lesson_id"] == candidate["lesson_id"]:
             if existing["lesson_directory"] != directory:
                 raise CourseStateError("duplicate_lesson_id", "duplicate lesson_id in another directory")
@@ -1049,6 +1103,12 @@ def record_lesson(root: Path, manifest: dict) -> dict:
         legal = candidate == previous or LESSON_STATUSES.index(status) == LESSON_STATUSES.index(previous["status"]) + 1
     if not legal:
         raise CourseStateError("invalid_lesson_transition", "allow only draft -> ready -> delivered -> assessed or unchanged replay")
+    if previous and previous["status"] != "draft":
+        if any(candidate[field] != previous[field] for field in LESSON_CONTENT_FIELDS):
+            raise CourseStateError(
+                "invalid_lesson_transition",
+                "lesson identity, objectives, and artifacts are immutable after ready",
+            )
     if status in {"delivered", "assessed"}:
         if _timestamp(candidate.get("delivered_at")) is None:
             raise CourseStateError("invalid_timestamp", "delivered_at requires an explicit timezone offset")
