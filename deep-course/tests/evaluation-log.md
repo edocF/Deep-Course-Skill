@@ -69,3 +69,64 @@ Short verbatim rationalizations:
 All fourteen observable decisions from the three scenario files appear once in the tables above: A1–A4, B1–B5, and C1–C5.
 
 The independent assessment is also RED and explicitly identifies C3. For Scenario A, that assessment substituted an expert/release-gate decision for the scenario’s actual learner-approval decision. This log follows the source scenario: technical sign-off is not learner approval, so A2 is recorded as an additional baseline failure.
+
+## Task 5: Interactive lesson shell inspection
+
+- Date: 2026-09-14; browser: installed Chrome 152.0.7977.83 on Windows, isolated headless profile.
+- Tool limitation: CUA and Node REPL could not initialize because the Windows sandbox helper reported `helper_unknown_error: setup refresh had errors`. The approved fallback used the installed Chrome browser and its debugging protocol through Node 24 standard-library APIs. This was a real browser render and input session; native print-dialog UI was not inspected.
+- Desktop (1280 × 900): inspected the rendered lesson, readable typography, navigation, completion progress, retrieval field and clear focus ring. No external assets are required.
+- Keyboard: Tab reached the visible skip link; Enter moved focus to main; Tab reached the textarea and radio group; Space selected the first option and ArrowDown selected the second. Authored feedback was hidden initially and appeared immediately for each selection. Focus remained visible.
+- Responses and download: entered an open explanation by keyboard and selected an objective option. Progress became 2 of 4, explicitly labelled completion rather than mastery. Clicking Download responses created the actual `deep-course-response-v1.json` file through Blob/object URL. Its two answers matched the controls; omitted questions were absent. Open responses carry no automatic semantic grade.
+- Narrow (390 × 844): visually inspected the header, navigation and objective feedback; browser layout reported no horizontal overflow. The first inspection exposed crowded list markers; the corrected two-column navigation was re-rendered and inspected.
+- Print: used Chrome print media and its PDF print renderer, then rendered and visually inspected every page of the final three-page output. Navigation/actions are hidden, entered prose is visible in full, unfilled responses have writing space, selected choices and revealed explanations remain visible, and no clipping was found. Fixed an orphaned section label and reduced excess print spacing during inspection.
+- Reduced motion: emulated the reduced-motion preference; the browser confirmed the media query and the page does not depend on animations.
+- Automated contracts: seven tests parse the actual HTML/data, execute the embedded JavaScript using Node's standard-library VM, exercise the JSON Blob download boundary, reject duplicate/unsafe question IDs and unknown options, and pass the generated payload directly to `append_attempt` while checking unchanged progress bytes.
+- Local inspection artifacts and repeatable inspection script: `.superpowers/sdd/2026-09-11-deep-course-v1/task-5-browser.mjs`, `task-5-desktop.png`, `task-5-narrow.png`, `task-5-narrow-feedback.png`, `task-5-browser-export.json`, `task-5-print.pdf`, and `task-5-print-final-1.png` through `task-5-print-final-3.png` (ignored working records).
+
+## Task 7: Forward-test release evidence
+
+- Date: 2026-09-15; isolated artifacts: `.superpowers/sdd/2026-09-11-deep-course-v1/task7-runs/`.
+- Baselines/variations: the long-course, quantitative, and adaptive-remediation
+  evaluations recorded under the plan root were rerun with the Skill. They retain
+  the original passes for proposal gating, source withholding, quantitative
+  reasoning, no-decorative-media conceptual work, traversal-path rejection without
+  state mutation, misconception-specific repair, delayed retrieval, and preserved
+  backbone. The two release blockers below were observed from those runs.
+- Completion blocker root cause: `next_session` selects the first backbone ID not
+  in `progress.completed_lessons`; an assessed lesson had no public transition into
+  that list. The initial regression RED was an expected missing
+  `complete_lesson` AttributeError. The green state suite was 72 passed, 1 skipped.
+  `complete_lesson(root, lesson_id)` now validates root and persisted lesson
+  artifacts, requires exactly one assessed manifest, atomically appends once, and
+  returns the same result on replay. Semantic completion remains Codex's
+  observable-rubric decision.
+- Responsive blocker root cause: the delivered five-column “Supplied constructed
+  bond” table had 17px text and .6rem cells at 390px; Chrome measured document
+  width 404px versus 390px viewport, with the table itself ending at x=403.7.
+  The immutable delivered `ytm-001` sample was preserved. The reusable mobile
+  table rule applies .82rem text and .45rem cells. A new `ytm-001-responsive-r1`
+  delivered sample was generated and validated; Chrome measured 390px/390px with
+  a 314px table. Evidence: `corrected-sample-generation.json` and
+  `corrected-browser-inspection.json`.
+- Full two-node round trip: `end-to-end-roundtrip.json` records init, approved
+  two-node curriculum, generated lesson lifecycle through assessed, response
+  export/append, judged mastery transaction, completion, and final validation.
+  `next_session.next_backbone_lesson.lesson_id` is `lesson-02-yield`; validation
+  reports `valid: true` with no errors or warnings.
+
+## Task 7 review-fix evidence
+
+- Preserved failed integration evidence: `end-to-end-roundtrip-course/` remains
+  a disconnected helper-only run, and delivered responsive-r1 remains a manifest/
+  HTML identity mismatch. Neither is treated as release proof.
+- Connected r2 round trip: `end-to-end-roundtrip-r2-course/lessons/lesson-01-cash-flow-r2/lesson.html` embeds
+  `roundtrip-finance-r2`, `lesson-01-cash-flow-r2`, `cash-flow-order-r2`, and
+  `cash-flow`. Chrome selected the authored response and downloaded
+  `end-to-end-roundtrip-r2-response.json`; that exact JSON was appended unchanged,
+  judged against the same question/knowledge IDs, assessed, completed, and
+  validated. `end-to-end-roundtrip-r2.json` records exact persistence and
+  `next_backbone_lesson.lesson_id = lesson-02-yield-r2`.
+- Responsive r2: `ytm-001-responsive-r2` is a new delivered revision with matching
+  manifest and embedded/exported lesson IDs. Chrome's real download is
+  `responsive-r2-response.json`; `responsive-r2-browser-inspection.json` confirms
+  course, lesson, question, and knowledge identity plus 390px/390px layout.

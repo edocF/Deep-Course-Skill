@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -529,6 +530,331 @@ class MasteryTests(CourseFixture):
             with self.assertRaises(course_state.CourseStateError):
                 course_state.apply_mastery_updates(self.root, "a2", updates, stamp)
             self.assertEqual(before, (self.root / "progress.json").read_bytes())
+
+
+class LessonLifecycleTests(CourseFixture):
+    def manifest(self, directory="lessons/001-topic", **fields):
+        lesson_dir = self.root / directory
+        lesson_dir.mkdir(parents=True, exist_ok=True)
+        artifacts = []
+        for name in ("lesson.html", "lesson.md", "exercises.md", "answers.md", "sources.md"):
+            path = lesson_dir / name
+            if not path.exists():
+                path.write_text("lesson content", encoding="utf-8")
+            artifacts.append({"path": f"{directory}/{name}",
+                              "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        artifacts.append({"path": f"{directory}/state.json"})
+        return {"schema_version": 1, "course_id": "finance", "lesson_id": "lesson-001",
+                "lesson_directory": directory, "status": "draft",
+                "learning_objectives": ["Explain a concept in a fresh example"],
+                "artifacts": artifacts, **fields}
+
+    def state_path(self):
+        return self.root / "lessons/001-topic/state.json"
+
+    def snapshot(self):
+        return {str(path.relative_to(self.root)): path.read_bytes()
+                for path in self.root.rglob("*") if path.is_file()}
+
+    def assert_rejected_unchanged(self, manifest, code=None):
+        before = self.snapshot()
+        with self.assertRaises(course_state.CourseStateError) as raised:
+            course_state.record_lesson(self.root, manifest)
+        if code:
+            self.assertEqual(code, raised.exception.code)
+        self.assertEqual(before, self.snapshot())
+
+    def ready(self):
+        manifest = self.manifest()
+        course_state.record_lesson(self.root, manifest)
+        manifest["status"] = "ready"
+        course_state.record_lesson(self.root, manifest)
+        return manifest
+
+    def test_draft_to_ready_persists_six_core_artifacts(self):
+        manifest = self.manifest()
+        self.assertEqual("draft", course_state.record_lesson(self.root, manifest)["status"])
+        manifest["status"] = "ready"
+        self.assertEqual(manifest, course_state.record_lesson(self.root, manifest))
+        self.assertEqual(manifest, json.loads(self.state_path().read_text(encoding="utf-8")))
+        self.assertTrue(course_state.validate_course(self.root)["valid"])
+        self.assertEqual({"path": "lessons/001-topic/state.json"}, manifest["artifacts"][-1])
+
+    def test_ready_requires_each_core_artifact_and_existing_bytes(self):
+        draft = self.manifest()
+        course_state.record_lesson(self.root, draft)
+        for missing in ("lesson.html", "lesson.md", "exercises.md", "answers.md", "sources.md", "state.json"):
+            with self.subTest(missing=missing):
+                manifest = json.loads(json.dumps(draft))
+                manifest["status"] = "ready"
+                manifest["artifacts"] = [a for a in manifest["artifacts"] if not a["path"].endswith("/" + missing)]
+                self.assert_rejected_unchanged(manifest, "missing_core_artifact")
+        (self.root / "lessons/001-topic/sources.md").unlink()
+        self.assert_rejected_unchanged({**draft, "status": "ready"}, "missing_artifact")
+
+    def test_partial_draft_can_be_completed_when_becoming_ready(self):
+        manifest = self.manifest(artifacts=[{"path": "lessons/001-topic/state.json"}], learning_objectives=[])
+        course_state.record_lesson(self.root, manifest)
+        self.assertEqual("ready", course_state.record_lesson(self.root, self.manifest(status="ready"))["status"])
+
+    def test_paths_reject_absolute_traversal_and_wrong_lesson_directory(self):
+        draft = self.manifest()
+        course_state.record_lesson(self.root, draft)
+        paths = [str(self.root / "lessons/001-topic/lesson.md"), "C:/outside.md", "/tmp/outside.md",
+                 "../outside.md", "lessons/001-topic/../002-other/lesson.md",
+                 "lessons/002-other/lesson.md", "lessons\\001-topic\\lesson.md"]
+        for path in paths:
+            with self.subTest(path=path):
+                manifest = json.loads(json.dumps(draft))
+                manifest["status"] = "ready"
+                manifest["artifacts"][1]["path"] = path
+                self.assert_rejected_unchanged(manifest, "invalid_artifact_path")
+        for directory in ("../x", "lessons/../x", "other/001-topic", "lessons", "lessons/a/b", "C:/x"):
+            with self.subTest(directory=directory):
+                self.assert_rejected_unchanged({**draft, "lesson_directory": directory}, "invalid_artifact_path")
+
+    def test_symbolic_link_escape_is_rejected(self):
+        manifest = self.manifest()
+        outside = self.root.parent / "outside.md"
+        outside.write_text("private content", encoding="utf-8")
+        link = self.root / "lessons/001-topic/link.md"
+        try:
+            link.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are not permitted on this platform")
+        manifest["artifacts"].append({"path": "lessons/001-topic/link.md",
+                                      "sha256": hashlib.sha256(outside.read_bytes()).hexdigest()})
+        self.assert_rejected_unchanged(manifest, "invalid_artifact_path")
+        self.assertEqual("private content", outside.read_text(encoding="utf-8"))
+
+    def test_duplicate_id_cannot_move_or_replace_another_id(self):
+        course_state.record_lesson(self.root, self.manifest())
+        self.assert_rejected_unchanged(self.manifest("lessons/002-other"), "duplicate_lesson_id")
+        self.assert_rejected_unchanged(self.manifest(lesson_id="lesson-other"), "duplicate_lesson_directory")
+
+    def test_hash_mismatch_and_self_hash_are_rejected(self):
+        manifest = self.manifest()
+        course_state.record_lesson(self.root, manifest)
+        for index, code in ((0, "artifact_hash_mismatch"), (-1, "invalid_artifact_hash")):
+            wrong = json.loads(json.dumps(manifest))
+            wrong["status"] = "ready"
+            wrong["artifacts"][index]["sha256"] = "0" * 64
+            self.assert_rejected_unchanged(wrong, code)
+
+    def test_ready_requires_nonempty_objectives(self):
+        manifest = self.manifest()
+        course_state.record_lesson(self.root, manifest)
+        for objectives in ([], [""], ["  "], [1], None, "Explain it"):
+            with self.subTest(objectives=objectives):
+                self.assert_rejected_unchanged({**manifest, "status": "ready", "learning_objectives": objectives})
+
+    def test_skipped_backward_and_changed_same_state_are_rejected(self):
+        manifest = self.manifest()
+        for status in ("ready", "delivered", "assessed"):
+            self.assert_rejected_unchanged({**manifest, "status": status}, "invalid_lesson_transition")
+        course_state.record_lesson(self.root, manifest)
+        for status in ("delivered", "assessed"):
+            self.assert_rejected_unchanged({**manifest, "status": status}, "invalid_lesson_transition")
+        manifest["status"] = "ready"
+        course_state.record_lesson(self.root, manifest)
+        self.assert_rejected_unchanged({**manifest, "status": "draft"}, "invalid_lesson_transition")
+        self.assert_rejected_unchanged({**manifest, "learning_objectives": ["Changed"]}, "invalid_lesson_transition")
+
+    def test_unchanged_replay_is_idempotent_but_still_checks_hashes(self):
+        manifest = self.ready()
+        before = self.snapshot()
+        modified_at = self.state_path().stat().st_mtime_ns
+        for _ in range(2):
+            self.assertEqual(manifest, course_state.record_lesson(self.root, manifest))
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(modified_at, self.state_path().stat().st_mtime_ns)
+        (self.root / "lessons/001-topic/lesson.md").write_text("tampered", encoding="utf-8")
+        self.assert_rejected_unchanged(manifest, "artifact_hash_mismatch")
+
+    def test_delivered_requires_offset_timestamp(self):
+        manifest = self.ready()
+        for timestamp in (None, "2026-09-11T10:00:00", "invalid"):
+            self.assert_rejected_unchanged({**manifest, "status": "delivered", "delivered_at": timestamp}, "invalid_timestamp")
+        delivered = {**manifest, "status": "delivered", "delivered_at": CREATED_AT}
+        self.assertEqual(delivered, course_state.record_lesson(self.root, delivered))
+        self.assert_rejected_unchanged({**delivered, "status": "ready"}, "invalid_lesson_transition")
+
+    def test_assessed_requires_existing_attempt_for_this_lesson(self):
+        manifest = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, manifest)
+        for ids in (None, [], ["missing"]):
+            self.assert_rejected_unchanged({**manifest, "status": "assessed", "attempt_ids": ids})
+        attempt = {"schema_version": 1, "attempt_id": "attempt-001", "lesson_id": "other",
+                   "submitted_at": CREATED_AT, "responses": []}
+        course_state.append_attempt(self.root, attempt)
+        self.assert_rejected_unchanged({**manifest, "status": "assessed", "attempt_ids": ["attempt-001"]}, "attempt_lesson_mismatch")
+        course_state.append_attempt(self.root, {**attempt, "attempt_id": "attempt-002", "lesson_id": "lesson-001"})
+        assessed = {**manifest, "status": "assessed", "attempt_ids": ["attempt-002"]}
+        self.assertEqual(assessed, course_state.record_lesson(self.root, assessed))
+        self.assertEqual(assessed, course_state.record_lesson(self.root, assessed))
+
+    def test_complete_assessed_lesson_advances_to_the_next_backbone_lesson(self):
+        curriculum = self.read_json("curriculum.json")
+        curriculum.update(
+            status="approved",
+            knowledge_nodes=[{"knowledge_id": "pv", "title": "Present value", "prerequisite_ids": []}],
+            backbone=[
+                {"lesson_id": "lesson-001", "title": "Present value", "knowledge_ids": ["pv"]},
+                {"lesson_id": "lesson-002", "title": "Bond pricing", "knowledge_ids": ["pv"]},
+            ],
+        )
+        self.write_json("curriculum.json", curriculum)
+        course = self.read_json("course.json")
+        course["status"] = "active"
+        self.write_json("course.json", course)
+        progress = self.read_json("progress.json")
+        progress["knowledge"] = {"pv": {"status": "mastered"}}
+        self.write_json("progress.json", progress)
+
+        delivered = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, delivered)
+        course_state.append_attempt(
+            self.root,
+            {"schema_version": 1, "attempt_id": "attempt-001", "lesson_id": "lesson-001",
+             "submitted_at": CREATED_AT, "responses": []},
+        )
+        course_state.record_lesson(
+            self.root, {**delivered, "status": "assessed", "attempt_ids": ["attempt-001"]}
+        )
+
+        self.assertEqual(
+            "lesson-001",
+            course_state.next_session(self.root, CREATED_AT)["next_backbone_lesson"]["lesson_id"],
+        )
+
+        self.assertEqual(
+            {"lesson_id": "lesson-001", "completed": True},
+            course_state.complete_lesson(self.root, "lesson-001"),
+        )
+        self.assertEqual(
+            "lesson-002",
+            course_state.next_session(self.root, CREATED_AT)["next_backbone_lesson"]["lesson_id"],
+        )
+
+    def test_delivered_to_assessed_rejects_rewritten_teaching_content(self):
+        delivered = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, delivered)
+        course_state.append_attempt(
+            self.root,
+            {
+                "schema_version": 1,
+                "attempt_id": "attempt-001",
+                "lesson_id": "lesson-001",
+                "submitted_at": CREATED_AT,
+                "responses": [],
+            },
+        )
+        assessed = {**delivered, "status": "assessed", "attempt_ids": ["attempt-001"]}
+        lesson_path = self.root / "lessons/001-topic/lesson.md"
+        appendix_path = self.root / "lessons/001-topic/appendix.md"
+        cases = {
+            "learning objectives": (
+                {**assessed, "learning_objectives": ["A revised objective"]},
+                "invalid_lesson_transition",
+            ),
+            "artifact content and hash": (assessed, "invalid_lesson_state"),
+            "artifact path set": (assessed, "invalid_lesson_transition"),
+        }
+        for mutation, (candidate, code) in cases.items():
+            lesson_path.write_text("lesson content", encoding="utf-8")
+            appendix_path.unlink(missing_ok=True)
+            self.state_path().write_text(json.dumps(delivered), encoding="utf-8")
+            candidate = json.loads(json.dumps(candidate))
+            if mutation == "artifact content and hash":
+                lesson_path.write_text("revised after delivery", encoding="utf-8")
+                for artifact in candidate["artifacts"]:
+                    if artifact["path"].endswith("/lesson.md"):
+                        artifact["sha256"] = hashlib.sha256(lesson_path.read_bytes()).hexdigest()
+            elif mutation == "artifact path set":
+                appendix_path.write_text("new material", encoding="utf-8")
+                candidate["artifacts"].append(
+                    {
+                        "path": "lessons/001-topic/appendix.md",
+                        "sha256": hashlib.sha256(appendix_path.read_bytes()).hexdigest(),
+                    }
+                )
+            with self.subTest(mutation=mutation):
+                self.assert_rejected_unchanged(candidate, code)
+
+    def test_replacement_failure_keeps_bytes_and_cleans_temporary_file(self):
+        manifest = self.manifest()
+        course_state.record_lesson(self.root, manifest)
+        before = self.snapshot()
+        with patch.object(course_state.os, "replace", side_effect=OSError("disk failure")):
+            with self.assertRaises(OSError):
+                course_state.record_lesson(self.root, {**manifest, "status": "ready"})
+        self.assertEqual(before, self.snapshot())
+
+    def test_malformed_manifest_rejects_without_writes(self):
+        manifest = self.manifest()
+        for fields in ({"schema_version": 99}, {"course_id": "other"}, {"lesson_id": ""},
+                       {"status": []}, {"artifacts": None}, {"artifacts": [None]},
+                       {"unexpected_path": "../x"}):
+            with self.subTest(fields=fields):
+                self.assert_rejected_unchanged({**manifest, **fields})
+
+    def test_resolved_escape_is_rejected_when_symlink_creation_is_unavailable(self):
+        manifest = self.manifest()
+        resolve = Path.resolve
+        target = self.root / "lessons/001-topic/lesson.md"
+
+        def redirected(path, *args, **kwargs):
+            if path == target:
+                return resolve(self.root.parent / "outside.md")
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", redirected):
+            self.assert_rejected_unchanged(manifest, "invalid_artifact_path")
+
+    def test_equivalent_normalized_paths_and_hashes_replay_without_write(self):
+        manifest = self.ready()
+        replay = json.loads(json.dumps(manifest))
+        replay["lesson_directory"] = "lessons/./001-topic/"
+        for item in replay["artifacts"]:
+            item["path"] = item["path"].replace("001-topic/", "001-topic/./")
+            if "sha256" in item:
+                item["sha256"] = item["sha256"].upper()
+        before = self.snapshot()
+        modified_at = self.state_path().stat().st_mtime_ns
+        self.assertEqual(manifest, course_state.record_lesson(self.root, replay))
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(modified_at, self.state_path().stat().st_mtime_ns)
+
+    def test_corrupted_stored_delivery_is_a_domain_error_without_mutation(self):
+        manifest = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, manifest)
+        corrupted = {key: value for key, value in manifest.items() if key != "delivered_at"}
+        self.state_path().write_text(json.dumps(corrupted), encoding="utf-8")
+        self.assert_rejected_unchanged({**manifest, "status": "assessed", "attempt_ids": ["missing"]})
+
+    def test_corrupted_persisted_ready_state_blocks_another_lesson_recording(self):
+        ready = self.ready()
+        corrupted = {**ready, "learning_objectives": [], "artifacts": []}
+        self.state_path().write_text(json.dumps(corrupted), encoding="utf-8")
+
+        candidate = self.manifest("lessons/002-other", lesson_id="lesson-002")
+        self.assert_rejected_unchanged(candidate, "invalid_lesson_state")
+
+    def test_corrupted_persisted_delivered_state_blocks_another_lesson_recording(self):
+        delivered = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, delivered)
+        corrupted = {key: value for key, value in delivered.items() if key != "delivered_at"}
+        self.state_path().write_text(json.dumps(corrupted), encoding="utf-8")
+
+        candidate = self.manifest("lessons/002-other", lesson_id="lesson-002")
+        self.assert_rejected_unchanged(candidate, "invalid_lesson_state")
+
+    def test_tampered_persisted_ready_artifact_blocks_another_lesson_recording(self):
+        self.ready()
+        (self.root / "lessons/001-topic/lesson.md").write_text("tampered", encoding="utf-8")
+
+        candidate = self.manifest("lessons/002-other", lesson_id="lesson-002")
+        self.assert_rejected_unchanged(candidate, "invalid_lesson_state")
 
 
 class ValidationTests(CourseFixture):

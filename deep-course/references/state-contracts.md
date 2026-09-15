@@ -117,3 +117,39 @@ this shape to stderr, leaves stdout empty, and exits `2`:
 ```json
 {"ok": false, "error": {"code": "...", "message": "...", "path": null}}
 ```
+
+## Director metadata writes
+
+The CLI implements only `init`, `validate`, and `next-session`. Import the Python
+module for `append_attempt`, `apply_mastery_updates`, `record_lesson`, and `complete_lesson`; their
+contracts are in [assessment-and-adaptation.md](assessment-and-adaptation.md) and
+[lesson-design.md](lesson-design.md). Do not invent additional CLI subcommands.
+
+For onboarding or approved revisions, `atomic_write_json(path, value)` is the
+available metadata writer, not a validating transaction. Use it only for the
+owned course.json, learner-profile.json, or curriculum.json after these checks:
+
+1. Serialize writers and successfully validate the live root. Resolve the exact
+   owned destination within that root; imported answers never supply write paths.
+2. Preserve IDs, schema versions, unrelated fields, and existing evidence. Build
+   the proposed document in memory. Copy current root-level state and attempts
+   into an isolated temporary candidate root, rejecting escaping source paths;
+   install the candidate there with `atomic_write_json` and run `validate_course`.
+3. If validation passes and any required learner approval exists, verify that live
+   state has not changed since the snapshot. Apply that one document through
+   `atomic_write_json` and validate the live root again. Repeat from fresh state
+   for another document. Keep a before-image until the operation is reconciled.
+
+This protocol is atomic per file, not across files. Save an approved curriculum
+before setting the course active. If a later write fails, inspect persisted files
+and the approval record, report partial status, and resume the remaining approved
+write only when they still agree. A failed validation stops further writes; it
+does not authorize replacing history or claiming the operation completed.
+
+Mastery/progress evidence, attempts, lesson manifests, and completion use their
+dedicated helpers instead of this metadata protocol. Call
+`complete_lesson(root, lesson_id)` only after Codex has observed and judged the
+lesson's completion evidence against its authored rubric. It requires valid root
+state and exactly one assessed lesson manifest, atomically appends the stable ID
+to `completed_lessons`, and is idempotent on replay. It never infers semantic
+completion from delivery, an attempt, or mastery alone.

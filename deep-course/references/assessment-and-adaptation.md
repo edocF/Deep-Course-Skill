@@ -22,7 +22,11 @@ are defined in [state-contracts.md](state-contracts.md).
    attempt is recorded, its progress transaction succeeds, and validation passes.
    If the progress write fails, retry it against the existing attempt ID. An
    already-applied ID is a signal to inspect progress, not to create another ID.
-5. Give the learner actionable feedback and the next retrieval activity. Use
+5. After the authored rubric's observable completion criteria are met, record the
+   assessed manifest and call `complete_lesson(root, lesson_id)`. This atomically
+   records Codex's semantic decision; neither delivery, a submitted attempt, nor
+   mastery automatically completes a lesson.
+6. Give the learner actionable feedback and the next retrieval activity. Use
    `next_session` to inspect the resulting due dates and recent misconceptions.
 
 ### Judgment rubric
