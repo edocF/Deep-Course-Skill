@@ -693,6 +693,49 @@ class LessonLifecycleTests(CourseFixture):
         self.assertEqual(assessed, course_state.record_lesson(self.root, assessed))
         self.assertEqual(assessed, course_state.record_lesson(self.root, assessed))
 
+    def test_complete_assessed_lesson_advances_to_the_next_backbone_lesson(self):
+        curriculum = self.read_json("curriculum.json")
+        curriculum.update(
+            status="approved",
+            knowledge_nodes=[{"knowledge_id": "pv", "title": "Present value", "prerequisite_ids": []}],
+            backbone=[
+                {"lesson_id": "lesson-001", "title": "Present value", "knowledge_ids": ["pv"]},
+                {"lesson_id": "lesson-002", "title": "Bond pricing", "knowledge_ids": ["pv"]},
+            ],
+        )
+        self.write_json("curriculum.json", curriculum)
+        course = self.read_json("course.json")
+        course["status"] = "active"
+        self.write_json("course.json", course)
+        progress = self.read_json("progress.json")
+        progress["knowledge"] = {"pv": {"status": "mastered"}}
+        self.write_json("progress.json", progress)
+
+        delivered = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
+        course_state.record_lesson(self.root, delivered)
+        course_state.append_attempt(
+            self.root,
+            {"schema_version": 1, "attempt_id": "attempt-001", "lesson_id": "lesson-001",
+             "submitted_at": CREATED_AT, "responses": []},
+        )
+        course_state.record_lesson(
+            self.root, {**delivered, "status": "assessed", "attempt_ids": ["attempt-001"]}
+        )
+
+        self.assertEqual(
+            "lesson-001",
+            course_state.next_session(self.root, CREATED_AT)["next_backbone_lesson"]["lesson_id"],
+        )
+
+        self.assertEqual(
+            {"lesson_id": "lesson-001", "completed": True},
+            course_state.complete_lesson(self.root, "lesson-001"),
+        )
+        self.assertEqual(
+            "lesson-002",
+            course_state.next_session(self.root, CREATED_AT)["next_backbone_lesson"]["lesson_id"],
+        )
+
     def test_delivered_to_assessed_rejects_rewritten_teaching_content(self):
         delivered = {**self.ready(), "status": "delivered", "delivered_at": CREATED_AT}
         course_state.record_lesson(self.root, delivered)

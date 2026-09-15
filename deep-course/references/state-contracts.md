@@ -121,7 +121,7 @@ this shape to stderr, leaves stdout empty, and exits `2`:
 ## Director metadata writes
 
 The CLI implements only `init`, `validate`, and `next-session`. Import the Python
-module for `append_attempt`, `apply_mastery_updates`, and `record_lesson`; their
+module for `append_attempt`, `apply_mastery_updates`, `record_lesson`, and `complete_lesson`; their
 contracts are in [assessment-and-adaptation.md](assessment-and-adaptation.md) and
 [lesson-design.md](lesson-design.md). Do not invent additional CLI subcommands.
 
@@ -146,7 +146,10 @@ and the approval record, report partial status, and resume the remaining approve
 write only when they still agree. A failed validation stops further writes; it
 does not authorize replacing history or claiming the operation completed.
 
-Mastery/progress evidence, attempts, and lesson manifests use their dedicated
-helpers instead of this metadata protocol. In v1 no public helper marks
-completed_lessons: preserve that field, report recorded completion as-is, and
-distinguish delivery and assessment from completion rather than synthesizing it.
+Mastery/progress evidence, attempts, lesson manifests, and completion use their
+dedicated helpers instead of this metadata protocol. Call
+`complete_lesson(root, lesson_id)` only after Codex has observed and judged the
+lesson's completion evidence against its authored rubric. It requires valid root
+state and exactly one assessed lesson manifest, atomically appends the stable ID
+to `completed_lessons`, and is idempotent on replay. It never infers semantic
+completion from delivery, an attempt, or mastery alone.

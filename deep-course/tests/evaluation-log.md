@@ -82,3 +82,34 @@ The independent assessment is also RED and explicitly identifies C3. For Scenari
 - Reduced motion: emulated the reduced-motion preference; the browser confirmed the media query and the page does not depend on animations.
 - Automated contracts: seven tests parse the actual HTML/data, execute the embedded JavaScript using Node's standard-library VM, exercise the JSON Blob download boundary, reject duplicate/unsafe question IDs and unknown options, and pass the generated payload directly to `append_attempt` while checking unchanged progress bytes.
 - Local inspection artifacts and repeatable inspection script: `.superpowers/sdd/2026-09-11-deep-course-v1/task-5-browser.mjs`, `task-5-desktop.png`, `task-5-narrow.png`, `task-5-narrow-feedback.png`, `task-5-browser-export.json`, `task-5-print.pdf`, and `task-5-print-final-1.png` through `task-5-print-final-3.png` (ignored working records).
+
+## Task 7: Forward-test release evidence
+
+- Date: 2026-09-15; isolated artifacts: `.superpowers/sdd/2026-09-11-deep-course-v1/task7-runs/`.
+- Baselines/variations: the long-course, quantitative, and adaptive-remediation
+  evaluations recorded under the plan root were rerun with the Skill. They retain
+  the original passes for proposal gating, source withholding, quantitative
+  reasoning, no-decorative-media conceptual work, traversal-path rejection without
+  state mutation, misconception-specific repair, delayed retrieval, and preserved
+  backbone. The two release blockers below were observed from those runs.
+- Completion blocker root cause: `next_session` selects the first backbone ID not
+  in `progress.completed_lessons`; an assessed lesson had no public transition into
+  that list. The initial regression RED was an expected missing
+  `complete_lesson` AttributeError. The green state suite was 72 passed, 1 skipped.
+  `complete_lesson(root, lesson_id)` now validates root and persisted lesson
+  artifacts, requires exactly one assessed manifest, atomically appends once, and
+  returns the same result on replay. Semantic completion remains Codex's
+  observable-rubric decision.
+- Responsive blocker root cause: the delivered five-column “Supplied constructed
+  bond” table had 17px text and .6rem cells at 390px; Chrome measured document
+  width 404px versus 390px viewport, with the table itself ending at x=403.7.
+  The immutable delivered `ytm-001` sample was preserved. The reusable mobile
+  table rule applies .82rem text and .45rem cells. A new `ytm-001-responsive-r1`
+  delivered sample was generated and validated; Chrome measured 390px/390px with
+  a 314px table. Evidence: `corrected-sample-generation.json` and
+  `corrected-browser-inspection.json`.
+- Full two-node round trip: `end-to-end-roundtrip.json` records init, approved
+  two-node curriculum, generated lesson lifecycle through assessed, response
+  export/append, judged mastery transaction, completion, and final validation.
+  `next_session.next_backbone_lesson.lesson_id` is `lesson-02-yield`; validation
+  reports `valid: true` with no errors or warnings.

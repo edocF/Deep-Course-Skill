@@ -1140,6 +1140,44 @@ def record_lesson(root: Path, manifest: dict) -> dict:
     return candidate
 
 
+def complete_lesson(root: Path, lesson_id: str) -> dict:
+    """Atomically record Codex-confirmed completion of one assessed lesson."""
+    root = Path(root).resolve()
+    if not isinstance(lesson_id, str) or not lesson_id.strip():
+        raise CourseStateError("invalid_field", "lesson_id must be a nonempty string")
+    if not validate_course(root)["valid"]:
+        raise CourseStateError("invalid_course_state", "course state is invalid", root)
+
+    course = json.loads(_owned_path(root, root / "course.json").read_text(encoding="utf-8"))
+    assessed = []
+    lessons_dir = _owned_path(root, root / "lessons")
+    for child in lessons_dir.iterdir():
+        state_path = child / "state.json"
+        if not (state_path.exists() or state_path.is_symlink()):
+            continue
+        _lesson_relative_path(root, child.relative_to(root).as_posix())
+        errors: list[dict] = []
+        manifest = _read_json_document(root, state_path, errors)
+        if errors:
+            raise CourseStateError("invalid_lesson_state", "cannot read existing lesson state", state_path)
+        manifest = _lesson_manifest_shape(root, manifest, course["course_id"])
+        if manifest["lesson_directory"] != child.relative_to(root).as_posix():
+            raise CourseStateError("invalid_lesson_state", "stored lesson directory differs from its location", state_path)
+        _check_persisted_lesson(root, manifest, check_artifacts=True)
+        if manifest["lesson_id"] == lesson_id:
+            assessed.append(manifest)
+    if len(assessed) != 1 or assessed[0]["status"] != "assessed":
+        raise CourseStateError("unassessed_lesson", "completion requires exactly one assessed lesson")
+
+    progress_path = _owned_path(root, root / "progress.json")
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    if lesson_id not in progress["completed_lessons"]:
+        candidate = json.loads(json.dumps(progress, ensure_ascii=False))
+        candidate["completed_lessons"].append(lesson_id)
+        atomic_write_json(progress_path, candidate)
+    return {"lesson_id": lesson_id, "completed": True}
+
+
 def next_session(root: Path, now: str) -> dict:
     """Compute due reviews, the next unlocked lesson, and recent misconceptions."""
 
