@@ -113,3 +113,20 @@ The independent assessment is also RED and explicitly identifies C3. For Scenari
   export/append, judged mastery transaction, completion, and final validation.
   `next_session.next_backbone_lesson.lesson_id` is `lesson-02-yield`; validation
   reports `valid: true` with no errors or warnings.
+
+## Task 7 review-fix evidence
+
+- Preserved failed integration evidence: `end-to-end-roundtrip-course/` remains
+  a disconnected helper-only run, and delivered responsive-r1 remains a manifest/
+  HTML identity mismatch. Neither is treated as release proof.
+- Connected r2 round trip: `end-to-end-roundtrip-r2-course/lesson.html` embeds
+  `roundtrip-finance-r2`, `lesson-01-cash-flow-r2`, `cash-flow-order-r2`, and
+  `cash-flow`. Chrome selected the authored response and downloaded
+  `end-to-end-roundtrip-r2-response.json`; that exact JSON was appended unchanged,
+  judged against the same question/knowledge IDs, assessed, completed, and
+  validated. `end-to-end-roundtrip-r2.json` records exact persistence and
+  `next_backbone_lesson.lesson_id = lesson-02-yield-r2`.
+- Responsive r2: `ytm-001-responsive-r2` is a new delivered revision with matching
+  manifest and embedded/exported lesson IDs. Chrome's real download is
+  `responsive-r2-response.json`; `responsive-r2-browser-inspection.json` confirms
+  course, lesson, question, and knowledge identity plus 390px/390px layout.

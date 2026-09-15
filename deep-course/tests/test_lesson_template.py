@@ -102,6 +102,9 @@ class LessonTemplateTests(unittest.TestCase):
         self.assertEqual({"schema_version", "course_id", "lesson_id", "exported_at", "submitted_at", "attempt_id", "responses"}, set(payload))
         self.assertEqual(1, payload["schema_version"])
         self.assertEqual("2026-09-14T02:00:00.000Z", payload["exported_at"])
+        self.assertEqual(self.data["course_id"], payload["course_id"])
+        self.assertEqual(self.data["lesson_id"], payload["lesson_id"])
+        self.assertEqual([{key: question[key] for key in ("question_id", "knowledge_ids")} for question in self.data["questions"]], [{key: response[key] for key in ("question_id", "knowledge_ids")} for response in payload["responses"]])
         self.assertEqual(len(self.data["questions"]), len(payload["responses"]))
         for response in payload["responses"]:
             self.assertEqual({"question_id", "knowledge_ids", "answer"}, set(response))

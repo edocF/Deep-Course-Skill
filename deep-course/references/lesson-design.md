@@ -174,4 +174,4 @@ accepts the delivered manifest.
 After the assessed manifest is accepted, use the assessment reference to decide
 whether observable rubric evidence establishes semantic lesson completion. Only
 then call `complete_lesson(root, lesson_id)`; the separate atomic operation
-requires one assessed lesson and does not treat delivery, assessment, or mastery
+requires one assessed lesson and does not treat delivery, assessment, or mastery as completion by itself.
