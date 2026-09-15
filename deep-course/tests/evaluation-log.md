@@ -119,7 +119,7 @@ The independent assessment is also RED and explicitly identifies C3. For Scenari
 - Preserved failed integration evidence: `end-to-end-roundtrip-course/` remains
   a disconnected helper-only run, and delivered responsive-r1 remains a manifest/
   HTML identity mismatch. Neither is treated as release proof.
-- Connected r2 round trip: `end-to-end-roundtrip-r2-course/lesson.html` embeds
+- Connected r2 round trip: `end-to-end-roundtrip-r2-course/lessons/lesson-01-cash-flow-r2/lesson.html` embeds
   `roundtrip-finance-r2`, `lesson-01-cash-flow-r2`, `cash-flow-order-r2`, and
   `cash-flow`. Chrome selected the authored response and downloaded
   `end-to-end-roundtrip-r2-response.json`; that exact JSON was appended unchanged,
