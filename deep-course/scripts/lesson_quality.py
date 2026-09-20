@@ -50,8 +50,14 @@ class _VisibleHTMLText(HTMLParser):
             return
         if self._ignored_depth:
             return
-        if tag in self._SECTION_TAGS or (tag == "div" and self._is_named_noninstructional_container(attrs)):
-            self._sections.append({"tag": tag, "parts": [], "headings": []})
+        is_named_noninstructional = tag == "div" and self._is_named_noninstructional_container(attrs)
+        if tag in self._SECTION_TAGS or is_named_noninstructional:
+            self._sections.append({
+                "tag": tag,
+                "parts": [],
+                "headings": [],
+                "is_named_noninstructional": is_named_noninstructional,
+            })
         if tag in {"h1", "h2", "h3", "h4", "h5", "h6"} and self._sections:
             self._heading_sections.append(self._sections[-1])
 
@@ -70,7 +76,8 @@ class _VisibleHTMLText(HTMLParser):
         if self._sections and self._sections[-1]["tag"] == tag:
             section = self._sections.pop()
             headings = section["headings"]
-            if not any(self._NONINSTRUCTIONAL_HEADING.search(heading) for heading in headings):
+            is_named_noninstructional = bool(section["is_named_noninstructional"])
+            if not is_named_noninstructional and not any(self._NONINSTRUCTIONAL_HEADING.search(heading) for heading in headings):
                 if self._sections:
                     self._sections[-1]["parts"].extend(section["parts"])
                 else:
@@ -95,8 +102,29 @@ def _error(code: str, message: str, *, path: str | None = None, field: str | Non
     return item
 
 
+def _strip_fenced_code_blocks(text: str) -> str:
+    """Remove CommonMark fenced code, including unclosed fences through EOF."""
+    retained: list[str] = []
+    fence_character: str | None = None
+    fence_length = 0
+    for line in text.splitlines(keepends=True):
+        stripped_line = line.rstrip("\r\n")
+        if fence_character is None:
+            opener = re.match(r"^ {0,3}(`{3,}|~{3,})[^\r\n]*$", stripped_line)
+            if opener:
+                marker = opener.group(1)
+                fence_character = marker[0]
+                fence_length = len(marker)
+            else:
+                retained.append(line)
+        elif re.fullmatch(rf" {{0,3}}{re.escape(fence_character)}{{{fence_length},}}[ \t]*", stripped_line):
+            fence_character = None
+            fence_length = 0
+    return "".join(retained)
+
+
 def _strip_markdown_noninstructional(text: str) -> str:
-    text = re.sub(r"(?ms)^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]{0,3}(?P=fence)[ \t]*$", "", text)
+    text = _strip_fenced_code_blocks(text)
     text = re.sub(r"(?m)^(?: {4}|\t).*(?:\n(?: {4}|\t).*)*", "", text)
     text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*(?:answer(?:s| key)?|sources?|references?)\b.*$(?:\n(?!\s{0,3}#{1,6}\s).*)*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)

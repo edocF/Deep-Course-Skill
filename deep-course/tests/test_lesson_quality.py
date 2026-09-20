@@ -139,6 +139,31 @@ class LessonQualityTests(unittest.TestCase):
             report = lesson_quality.audit_lesson(root, self.make_lesson(root, markdown_text=markdown))
         self.assertEqual(4, report["metrics"]["markdown_reading_units"])
 
+    def test_excludes_named_html_answer_and_source_containers_without_headings(self):
+        """Catches named support containers reaching the learner-facing HTML metric."""
+        html = "<main><p>Visible prose.</p><div class='answer-key'>" + "answer " * 1000 + "</div><div id='sources'>" + "source " * 1000 + "</div></main>"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = lesson_quality.audit_lesson(root, self.make_lesson(root, html_text=html))
+        self.assertEqual(4, report["metrics"]["html_reading_units"])
+
+    def test_excludes_fences_with_longer_matching_character_closers(self):
+        """Catches requiring a fence closer to be exactly as long as its opener."""
+        for opener, closer in (("```", "````"), ("~~~", "~~~~")):
+            with self.subTest(opener=opener), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                markdown = f"Visible prose.\n\n{opener}python\nhidden_code {'hidden_code ' * 300}\n{closer}\n"
+                report = lesson_quality.audit_lesson(root, self.make_lesson(root, markdown_text=markdown))
+            self.assertEqual(4, report["metrics"]["markdown_reading_units"])
+
+    def test_does_not_treat_shorter_or_mixed_fences_as_closers(self):
+        """Catches ending a CommonMark fence with an invalid closer."""
+        for opener, invalid_closer in (("```", "``"), ("```", "~~~"), ("~~~", "~~"), ("~~~", "```")):
+            with self.subTest(opener=opener, invalid_closer=invalid_closer), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                markdown = f"Visible prose.\n\n{opener}\nhidden_code {'hidden_code ' * 300}\n{invalid_closer}\ntrailing_code {'trailing_code ' * 300}"
+                report = lesson_quality.audit_lesson(root, self.make_lesson(root, markdown_text=markdown))
+            self.assertEqual(4, report["metrics"]["markdown_reading_units"])
     def test_excludes_linked_navigation_labels_before_counting_markdown(self):
         """Catches normalizing navigation links too late for their labels to be excluded."""
         with tempfile.TemporaryDirectory() as temporary:
