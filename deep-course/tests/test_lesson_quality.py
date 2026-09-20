@@ -59,24 +59,23 @@ a higher required yield for the same promised cash flows.
 
 
 class LessonQualityTests(unittest.TestCase):
-    def make_lesson(self, root, *, lesson_directory="lessons/bond-yield", include_markdown=True):
+    def make_lesson(self, root, *, lesson_directory="lessons/bond-yield", include_markdown=True, markdown_text=INSTRUCTIONAL_TEXT, html_text=None, planned_minutes=35):
         lesson = root / lesson_directory
         lesson.mkdir(parents=True, exist_ok=True)
         if include_markdown:
-            (lesson / "lesson.md").write_text(INSTRUCTIONAL_TEXT, encoding="utf-8")
-        (lesson / "lesson.html").write_text(
-            """<!doctype html><html><head><style>.hidden { display: none; }</style></head>
+            (lesson / "lesson.md").write_text(markdown_text, encoding="utf-8")
+        if html_text is None:
+            html_text = """<!doctype html><html><head><style>.hidden { display: none; }</style></head>
             <body><nav>Previous Next</nav><main><h1>Bond yield</h1><p>Short lesson shell.</p>
             <form><label for=answer>Explain your estimate</label><textarea id=answer></textarea>
             <button>Check answer</button></form><script>const answer = 'not reading';</script>
-            </main></body></html>""",
-            encoding="utf-8",
-        )
+            </main></body></html>"""
+        (lesson / "lesson.html").write_text(html_text, encoding="utf-8")
         for name in ("exercises.md", "answers.md", "sources.md", "state.json"):
             (lesson / name).write_text("artifact", encoding="utf-8")
         return {
             "lesson_directory": lesson_directory,
-            "planned_minutes": 35,
+            "planned_minutes": planned_minutes,
             "artifacts": [{"path": f"{lesson_directory}/{name}"} for name in (
                 "lesson.md", "lesson.html", "exercises.md", "answers.md", "sources.md", "state.json"
             )],
@@ -108,6 +107,66 @@ class LessonQualityTests(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("missing_artifact", {item["code"] for item in report["errors"]})
 
+    def test_rejects_light_and_deep_lessons_below_their_reading_floors(self):
+        """Catches applying the reading-depth floor only to normal lessons."""
+        for minutes, text in ((12, "lesson " * 299), (60, "lesson " * 1749)):
+            with self.subTest(minutes=minutes), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                report = lesson_quality.audit_lesson(root, self.make_lesson(root, planned_minutes=minutes, markdown_text=text))
+            self.assertIn("insufficient_reading_depth", {item["code"] for item in report["errors"]})
+
+    def test_rejects_missing_malformed_and_out_of_band_duration_evidence(self):
+        """Catches accepting a duration that cannot identify a depth band."""
+        for minutes in (None, True, "35", float("nan"), float("inf"), 25):
+            with self.subTest(minutes=minutes), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                report = lesson_quality.audit_lesson(root, self.make_lesson(root, planned_minutes=minutes))
+            self.assertIn("invalid_time_evidence", {item["code"] for item in report["errors"]})
+
+    def test_excludes_html_answer_key_and_source_sections_from_reading_metric(self):
+        """Catches answer-key or source prose inflating the learner-facing HTML metric."""
+        html = "<main><p>Visible prose.</p><section><h2>Answer key</h2><p>" + "answer " * 1000 + "</p></section><section><h2>Sources</h2><p>" + "source " * 1000 + "</p></section></main>"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = lesson_quality.audit_lesson(root, self.make_lesson(root, html_text=html))
+        self.assertEqual(4, report["metrics"]["html_reading_units"])
+
+    def test_excludes_tilde_and_indented_markdown_code_from_reading_metric(self):
+        """Catches code examples inflating the instructional Markdown reading metric."""
+        markdown = "Visible prose.\n\n~~~python\nhidden_code " + "hidden_code " * 300 + "\n~~~\n\n    indented_code " + "indented_code " * 300
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = lesson_quality.audit_lesson(root, self.make_lesson(root, markdown_text=markdown))
+        self.assertEqual(4, report["metrics"]["markdown_reading_units"])
+
+    def test_excludes_linked_navigation_labels_before_counting_markdown(self):
+        """Catches normalizing navigation links too late for their labels to be excluded."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = lesson_quality.audit_lesson(root, self.make_lesson(root, markdown_text="[Previous](previous.html)\n[Next](next.html)\n\nVisible prose."))
+        self.assertEqual(4, report["metrics"]["markdown_reading_units"])
+
+    def test_returns_structured_error_for_escaping_lesson_directory(self):
+        """Catches a traversal path escaping the candidate course root during audit."""
+        with tempfile.TemporaryDirectory() as temporary:
+            report = lesson_quality.audit_lesson(Path(temporary), {"lesson_directory": "../outside", "planned_minutes": 35})
+        self.assertIn("invalid_artifact_path", {item["code"] for item in report["errors"]})
+
+    def test_returns_structured_error_for_invalid_utf8_and_binary_controls(self):
+        """Catches non-text artifacts being counted as instructional text instead of rejected."""
+        for content, code in ((b"\xff", "unreadable_artifact"), (b"Visible\x01prose", "non_text_artifact")):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary); manifest = self.make_lesson(root)
+                (root / manifest["lesson_directory"] / "lesson.md").write_bytes(content)
+                report = lesson_quality.audit_lesson(root, manifest)
+            self.assertIn(code, {item["code"] for item in report["errors"]})
+
+    def test_allows_normal_whitespace_in_text_artifacts(self):
+        """Catches treating ordinary whitespace as binary data."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = lesson_quality.audit_lesson(root, self.make_lesson(root, markdown_text="Visible\tprose\r\nwith ordinary whitespace."))
+        self.assertNotIn("non_text_artifact", {item["code"] for item in report["errors"]})
 
 if __name__ == "__main__":
     unittest.main()
