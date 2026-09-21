@@ -147,6 +147,13 @@ class LessonQualityTests(unittest.TestCase):
             report = lesson_quality.audit_lesson(root, self.make_lesson(root, html_text=html))
         self.assertEqual(4, report["metrics"]["html_reading_units"])
 
+    def test_excludes_named_semantic_support_containers_without_headings(self):
+        """Catches section and aside support containers reaching the HTML metric."""
+        html = "<main><p>Visible prose.</p><section class='answer-key'><p>" + "answer " * 500 + "</p><aside><p>" + "nested_answer " * 500 + "</p></aside></section><aside id='sources'><p>" + "source " * 500 + "</p><section><p>" + "nested_source " * 500 + "</p></section></aside><p>Remaining prose.</p></main>"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = lesson_quality.audit_lesson(root, self.make_lesson(root, html_text=html))
+        self.assertEqual(8, report["metrics"]["html_reading_units"])
     def test_excludes_fences_with_longer_matching_character_closers(self):
         """Catches requiring a fence closer to be exactly as long as its opener."""
         for opener, closer in (("```", "````"), ("~~~", "~~~~")):

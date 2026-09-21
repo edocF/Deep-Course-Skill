@@ -50,7 +50,7 @@ class _VisibleHTMLText(HTMLParser):
             return
         if self._ignored_depth:
             return
-        is_named_noninstructional = tag == "div" and self._is_named_noninstructional_container(attrs)
+        is_named_noninstructional = self._is_named_noninstructional_container(attrs)
         if tag in self._SECTION_TAGS or is_named_noninstructional:
             self._sections.append({
                 "tag": tag,
