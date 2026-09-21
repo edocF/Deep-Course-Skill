@@ -85,16 +85,27 @@ class LessonQualityTests(unittest.TestCase):
 
     def make_quality_lesson(self, root, *, repetitions=20):
         """Create a hand-checkable, fully declared normal-depth lesson."""
+        (root / "curriculum.json").write_text(json.dumps({
+            "schema_version": 1,
+            "course_id": "bond-course",
+            "status": "draft",
+            "learning_outcomes": [],
+            "modules": [],
+            "knowledge_nodes": [
+                {"knowledge_id": "present-value", "title": "Present value", "prerequisite_ids": []},
+            ],
+            "backbone": [],
+        }), encoding="utf-8")
         definitions = [
             ("Why bond yield matters", "orientation", "Orientation frames the learner's decision before any calculation begins."),
             ("Bridge from present value", "prerequisite-bridge", "Present value knowledge connects earlier discounting work to the new yield estimate."),
             ("Price and yield move oppositely", "price-yield", "A fixed promised cash flow becomes less valuable when the required yield rises."),
             ("Estimate yield with trial prices", "trial-yield", "A trial yield is revised by comparing its calculated price with the observed market price."),
             ("Connect the reasoning", "synthesis", "The direction rule and trial calculation combine into one defensible estimate."),
-            ("Consolidate the method", "consolidation", "The final check states the cash flows, direction, trial result, and justified conclusion."),
             ("Worked example: trial yields", "worked-full", "The complete example shows every discounting step and explains the next trial."),
             ("Faded example: changing price", "worked-faded", "The faded example supplies the cash flows while the learner chooses the yield direction."),
             ("Independent task: explain the estimate", "worked-independent", "The independent task asks the learner to calculate and justify an unseen bond estimate."),
+            ("Consolidate the method", "consolidation", "The final check states the cash flows, direction, trial result, and justified conclusion."),
         ]
         markdown_parts = []
         html_parts = []
@@ -108,7 +119,7 @@ class LessonQualityTests(unittest.TestCase):
         question_ids = ("q-direction", "q-trial", "q-explain")
         questions = [{"id": item, "required": True} for item in question_ids]
         controls = "".join(f'<textarea data-question-id="{item}" required></textarea>' for item in question_ids)
-        html = "<!doctype html><html><body><main>" + "".join(html_parts) + controls + (
+        html = "<!doctype html><html><body><main>" + "".join(html_parts[:-1]) + controls + html_parts[-1] + (
             '<script id="lesson-data" type="application/json">'
             + json.dumps({"questions": questions})
             + "</script></main></body></html>"
@@ -167,18 +178,35 @@ class LessonQualityTests(unittest.TestCase):
         html_path.write_text(html.replace(old_controls, new_controls).replace(old_data, new_data), encoding="utf-8")
         manifest["quality_evidence"]["response_question_ids"] = list(question_ids)
 
+    def set_lesson_data_questions(self, root, manifest, questions):
+        html_path = root / manifest["lesson_directory"] / "lesson.html"
+        html = html_path.read_text(encoding="utf-8")
+        marker = '<script id="lesson-data" type="application/json">'
+        start = html.index(marker) + len(marker)
+        end = html.index("</script>", start)
+        html_path.write_text(
+            html[:start] + json.dumps({"questions": questions}) + html[end:],
+            encoding="utf-8",
+        )
+
     def assert_audit_is_read_only(self, root, manifest, expected_code):
         before_manifest = copy.deepcopy(manifest)
         lesson = root / manifest["lesson_directory"]
         before_markdown = (lesson / "lesson.md").read_bytes()
         before_html = (lesson / "lesson.html").read_bytes()
+        curriculum_path = root / "curriculum.json"
+        before_curriculum = curriculum_path.read_bytes() if curriculum_path.exists() else None
 
-        report = lesson_quality.audit_lesson(root, manifest)
+        try:
+            report = lesson_quality.audit_lesson(root, manifest)
+        except Exception as error:  # The audit contract reports malformed input; it never raises it.
+            self.fail(f"audit raised {type(error).__name__}: {error}")
 
         self.assertIn(expected_code, {item["code"] for item in report["errors"]})
         self.assertEqual(before_manifest, manifest)
         self.assertEqual(before_markdown, (lesson / "lesson.md").read_bytes())
         self.assertEqual(before_html, (lesson / "lesson.html").read_bytes())
+        self.assertEqual(before_curriculum, curriculum_path.read_bytes() if curriculum_path.exists() else None)
         return report
 
     def test_rejects_exact_quality_contract_mutations_without_writing_inputs(self):
@@ -324,6 +352,183 @@ class LessonQualityTests(unittest.TestCase):
                 manifest = self.make_quality_lesson(root)
                 mutate(root, manifest)
                 self.assert_audit_is_read_only(root, manifest, "artifact_correspondence")
+
+    def test_rejects_anonymous_or_duplicated_required_controls_and_groups(self):
+        """Catches required HTML workload disappearing when identities are absent or collapsed."""
+        additions = {
+            "anonymous required control": '<textarea required></textarea>',
+            "duplicated required control": '<textarea data-question-id="q-direction" required></textarea>',
+            "duplicated response group": '<div data-questions="practice"></div><div data-questions="practice"></div>',
+        }
+        for label, addition in additions.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                html_path = root / manifest["lesson_directory"] / "lesson.html"
+                html = html_path.read_text(encoding="utf-8")
+                html_path.write_text(html.replace("</main>", addition + "</main>"), encoding="utf-8")
+                self.assert_audit_is_read_only(root, manifest, "artifact_correspondence")
+
+    def test_response_independence_requires_explicit_support_and_objective_metadata(self):
+        """Catches guided response IDs being treated as independent objective practice."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            manifest["quality_evidence"]["worked_examples"].pop()
+            guided = [
+                {"id": "q-direction", "required": True, "support": "guided", "objective_ids": ["explain-direction"]},
+                {"id": "q-trial", "required": True, "support": "guided", "objective_ids": ["estimate-yield"]},
+                {"id": "q-explain", "required": True, "support": "guided", "objective_ids": ["estimate-yield", "explain-direction"]},
+            ]
+            self.set_lesson_data_questions(root, manifest, guided)
+            self.assert_audit_is_read_only(root, manifest, "missing_worked_example")
+
+            for example in manifest["quality_evidence"]["worked_examples"]:
+                example["objective_ids"] = []
+            independent = [dict(item) for item in guided]
+            independent[-1] = {
+                "id": "q-explain",
+                "required": True,
+                "support": "independent",
+                "objective_ids": ["estimate-yield", "explain-direction"],
+            }
+            self.set_lesson_data_questions(root, manifest, independent)
+            report = lesson_quality.audit_lesson(root, manifest)
+            self.assertTrue(report["valid"], report["errors"])
+
+    def test_rejects_unknown_response_objective_references(self):
+        """Catches lesson-data response metadata bypassing objective-reference validation."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            questions = [
+                {"id": item, "required": True, "support": "independent", "objective_ids": ["unknown-objective"]}
+                for item in manifest["quality_evidence"]["response_question_ids"]
+            ]
+            self.set_lesson_data_questions(root, manifest, questions)
+            self.assert_audit_is_read_only(root, manifest, "artifact_correspondence")
+
+    def test_response_based_independent_practice_must_be_rendered(self):
+        """Catches lesson-data-only independent work counting without a real HTML response location."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            manifest["quality_evidence"]["worked_examples"].pop()
+            questions = [
+                {"id": "q-direction", "required": True, "support": "guided", "objective_ids": ["explain-direction"]},
+                {"id": "q-trial", "required": True, "support": "guided", "objective_ids": ["estimate-yield"]},
+                {"id": "q-explain", "required": True, "support": "independent", "objective_ids": ["estimate-yield", "explain-direction"]},
+            ]
+            self.set_lesson_data_questions(root, manifest, questions)
+            html_path = root / manifest["lesson_directory"] / "lesson.html"
+            html = html_path.read_text(encoding="utf-8")
+            html_path.write_text(
+                html.replace('<textarea data-question-id="q-explain" required></textarea>', ""),
+                encoding="utf-8",
+            )
+            self.assert_audit_is_read_only(root, manifest, "artifact_correspondence")
+
+    def test_rejects_declared_content_reordered_in_both_artifacts(self):
+        """Catches membership-only progression checks that ignore learner-visible order."""
+        cases = (
+            (("Why bond yield matters", "Bridge from present value"), ("orientation", "prerequisite-bridge")),
+            (("Worked example: trial yields", "Faded example: changing price"), ("worked-full", "worked-faded")),
+            (("Independent task: explain the estimate", "Consolidate the method"), ("worked-independent", "consolidation")),
+        )
+        for headings, html_ids in cases:
+            with self.subTest(headings=headings), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                lesson = root / manifest["lesson_directory"]
+                markdown_path = lesson / "lesson.md"
+                markdown = markdown_path.read_text(encoding="utf-8")
+                markdown = markdown.replace(headings[0], "__SWAP_HEADING__").replace(headings[1], headings[0]).replace("__SWAP_HEADING__", headings[1])
+                markdown_path.write_text(markdown, encoding="utf-8")
+                html_path = lesson / "lesson.html"
+                html = html_path.read_text(encoding="utf-8")
+                html = html.replace(f'id="{html_ids[0]}"', 'id="__swap-id__"').replace(f'id="{html_ids[1]}"', f'id="{html_ids[0]}"').replace('id="__swap-id__"', f'id="{html_ids[1]}"')
+                html_path.write_text(html, encoding="utf-8")
+                self.assert_audit_is_read_only(root, manifest, "missing_progression")
+
+    def test_huge_minute_values_return_structured_errors_without_writes(self):
+        """Catches finite-number validation overflowing before it can return an audit report."""
+        for field in ("planned_minutes", "reading_minutes", "response_minutes"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                manifest["quality_evidence"][field] = 10**400
+                self.assert_audit_is_read_only(root, manifest, "invalid_quality_evidence")
+
+    def test_legacy_huge_planned_minutes_returns_structured_error(self):
+        """Catches the Task 1 duration path overflowing when no quality evidence is present."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_lesson(root, planned_minutes=10**400)
+            try:
+                report = lesson_quality.audit_lesson(root, manifest)
+            except Exception as error:
+                self.fail(f"audit raised {type(error).__name__}: {error}")
+        self.assertIn("invalid_time_evidence", {item["code"] for item in report["errors"]})
+
+    def test_markdown_comment_headings_do_not_satisfy_or_duplicate_declarations(self):
+        """Catches non-rendered HTML comments entering the Markdown heading index."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            markdown_path = root / manifest["lesson_directory"] / "lesson.md"
+            markdown = markdown_path.read_text(encoding="utf-8")
+            markdown_path.write_text(
+                markdown.replace("## Why bond yield matters", "<!--\n## Why bond yield matters\n-->", 1),
+                encoding="utf-8",
+            )
+            self.assert_audit_is_read_only(root, manifest, "artifact_correspondence")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            markdown_path = root / manifest["lesson_directory"] / "lesson.md"
+            markdown = markdown_path.read_text(encoding="utf-8")
+            markdown_path.write_text(
+                "<!--\n## Why bond yield matters\nOld heading retained for editorial context.\n-->\n\n" + markdown,
+                encoding="utf-8",
+            )
+            report = lesson_quality.audit_lesson(root, manifest)
+            self.assertTrue(report["valid"], report["errors"])
+
+    def test_semantic_review_timestamp_requires_strict_iso8601_offset_syntax(self):
+        """Catches permissive datetime parsing accepting non-contract timestamp spellings."""
+        for timestamp in (
+            "2026-09-15T09:30:00+00:99",
+            "2026-09-15X09:30:00+00:00",
+            "2026-09-15T09:30:00",
+        ):
+            with self.subTest(timestamp=timestamp), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                manifest["quality_evidence"]["semantic_review"]["reviewed_at"] = timestamp
+                self.assert_audit_is_read_only(root, manifest, "invalid_quality_evidence")
+
+    def test_prerequisite_knowledge_ids_must_exist_in_curriculum(self):
+        """Catches syntactically safe prerequisite IDs that do not exist in authoritative curriculum state."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            manifest["quality_evidence"]["reading_sections"][2]["prerequisite_knowledge_ids"] = ["unknown-knowledge"]
+            self.assert_audit_is_read_only(root, manifest, "invalid_quality_evidence")
+
+    def test_quality_audit_reports_missing_malformed_and_unreadable_curriculum(self):
+        """Catches curriculum dependency failures escaping or being silently treated as an empty ID set."""
+        mutations = {
+            "missing": (lambda path: path.unlink(), "missing_artifact"),
+            "malformed": (lambda path: path.write_text("{", encoding="utf-8"), "invalid_curriculum"),
+            "unreadable": (lambda path: path.write_bytes(b"\xff"), "unreadable_artifact"),
+        }
+        for label, (mutate, expected_code) in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                mutate(root / "curriculum.json")
+                self.assert_audit_is_read_only(root, manifest, expected_code)
 
     def test_rejects_normal_lesson_with_shallow_instructional_reading(self):
         """Catches removing the normal-depth floor from a timed lesson audit."""

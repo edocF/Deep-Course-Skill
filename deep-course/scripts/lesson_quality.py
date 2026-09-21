@@ -36,6 +36,7 @@ _READING_ROLES = {"orientation", "prerequisite_bridge", "concept", "synthesis", 
 _EXAMPLE_SUPPORT = {"full", "faded", "independent"}
 _RESPONSE_COUNT_LIMITS = {"light": (2, 3), "normal": (3, 5), "deep": (5, 8)}
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_MAX_FINITE_FLOAT_INTEGER = int(float.fromhex("0x1.fffffffffffffp+1023"))
 
 
 class QualityEvidenceError(ValueError):
@@ -59,7 +60,13 @@ def _exact_object(value: object, fields: set[str], field: str) -> dict:
 
 
 def _finite_number(value: object, field: str) -> int | float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    invalid = (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or (isinstance(value, float) and not math.isfinite(value))
+        or (isinstance(value, int) and abs(value) > _MAX_FINITE_FLOAT_INTEGER)
+    )
+    if invalid:
         _quality_failure(f"{field} must be a finite number and not a boolean.", field)
     return value
 
@@ -90,8 +97,16 @@ def _id_list(value: object, field: str, *, known: set[str] | None = None) -> lis
 
 def _offset_timestamp(value: object, field: str) -> str:
     timestamp = _nonempty_string(value, field)
-    if re.search(r"(?:Z|[+-]\d\d:\d\d)$", timestamp) is None:
-        _quality_failure(f"{field} must include an explicit timezone offset.", field)
+    lexical = re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))",
+        timestamp,
+    )
+    if lexical is None:
+        _quality_failure(f"{field} must be ISO 8601 with a T separator and explicit offset.", field)
+    offset_hour = lexical.group(2)
+    offset_minute = lexical.group(3)
+    if offset_hour is not None and (int(offset_hour) > 23 or int(offset_minute) > 59):
+        _quality_failure(f"{field} has an invalid timezone offset.", field)
     try:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError:
@@ -307,17 +322,28 @@ class _LessonHTMLIndex(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.id_counts: Counter[str] = Counter()
+        self.id_positions: dict[str, list[int]] = {}
         self.lesson_data_parts: list[str] = []
-        self.required_control_ids: set[str] = set()
+        self.required_control_ids: list[str | None] = []
+        self.required_control_positions: list[tuple[str | None, int]] = []
+        self.question_groups: list[str | None] = []
+        self.question_group_positions: list[tuple[str | None, int]] = []
         self._lesson_data_depth = 0
+        self._position = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._position += 1
         attributes = {name.lower(): value for name, value in attrs}
         html_id = attributes.get("id")
         if html_id is not None:
             self.id_counts[html_id] += 1
+            self.id_positions.setdefault(html_id, []).append(self._position)
         if tag.lower() == "script" and html_id == "lesson-data":
             self._lesson_data_depth += 1
+        if "data-questions" in attributes:
+            group = attributes.get("data-questions")
+            self.question_groups.append(group)
+            self.question_group_positions.append((group, self._position))
         if tag.lower() in {"input", "select", "textarea"} and "required" in attributes:
             question_id = (
                 attributes.get("data-question-id")
@@ -325,8 +351,8 @@ class _LessonHTMLIndex(HTMLParser):
                 or attributes.get("name")
                 or html_id
             )
-            if question_id:
-                self.required_control_ids.add(question_id)
+            self.required_control_ids.append(question_id)
+            self.required_control_positions.append((question_id, self._position))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
@@ -347,7 +373,7 @@ def _normalized_label(value: str) -> str:
 
 
 def _markdown_headings(text: str) -> list[dict[str, object]]:
-    text = _strip_fenced_code_blocks(text)
+    text = _strip_markdown_html_comments(_strip_fenced_code_blocks(text))
     matches = list(re.finditer(r"(?m)^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*$", text))
     headings: list[dict[str, object]] = []
     for index, match in enumerate(matches):
@@ -361,6 +387,7 @@ def _markdown_headings(text: str) -> list[dict[str, object]]:
         headings.append({
             "heading": _normalized_label(heading),
             "body": text[match.end():end],
+            "position": match.start(),
         })
     return headings
 
@@ -381,8 +408,60 @@ def _append_error_once(errors: list[dict], code: str, message: str, **details: s
         errors.append(_error(code, message, **details))
 
 
-def _progression_errors(evidence: dict) -> list[dict]:
+def _ordered_progression(
+    evidence: dict,
+    response_questions: list[dict],
+    artifact_positions: dict[str, dict[tuple[str, str], int]],
+    source: str,
+) -> bool:
+    positions = artifact_positions[source]
+    sections = evidence["reading_sections"]
+    examples = evidence["worked_examples"]
+
+    def reading(role: str) -> list[int] | None:
+        keys = [("reading", item["content_id"]) for item in sections if item["role"] == role]
+        return [positions[key] for key in keys] if all(key in positions for key in keys) else None
+
+    def support(level: str) -> list[int] | None:
+        keys = [("example", item["example_id"]) for item in examples if item["support"] == level]
+        return [positions[key] for key in keys] if all(key in positions for key in keys) else None
+
+    phases: list[list[int]] = []
+    for role in ("orientation", "prerequisite_bridge"):
+        values = reading(role)
+        if values is None:
+            return True
+        phases.append(values)
+    concept_positions = reading("concept")
+    if concept_positions is None:
+        return True
+    phases.extend([[position] for position in concept_positions])
+    synthesis = reading("synthesis")
+    full = support("full")
+    faded = support("faded")
+    independent = support("independent")
+    consolidation = reading("consolidation")
+    if any(values is None for values in (synthesis, full, faded, independent, consolidation)):
+        return True
+    phases.extend([synthesis, full, faded])
+    if source == "html":
+        independent = independent + [
+            item["html_position"]
+            for item in response_questions
+            if item["support"] == "independent" and item["objective_ids"] and item["html_position"] is not None
+        ]
+    phases.extend([independent, consolidation])
+    populated = [values for values in phases if values]
+    return all(max(before) < min(after) for before, after in zip(populated, populated[1:]))
+
+
+def _progression_errors(
+    evidence: dict,
+    response_questions: list[dict] | None = None,
+    artifact_positions: dict[str, dict[tuple[str, str], int]] | None = None,
+) -> list[dict]:
     errors: list[dict] = []
+    response_questions = response_questions or []
     sections = evidence["reading_sections"]
     examples = evidence["worked_examples"]
     objective_ids = {item["objective_id"] for item in evidence["objectives"]}
@@ -394,8 +473,22 @@ def _progression_errors(evidence: dict) -> list[dict]:
                 "Normal lessons require all five reading roles and two or three concept sections.",
                 field="reading_sections",
             ))
+        if artifact_positions is not None and not all(
+            _ordered_progression(evidence, response_questions, artifact_positions, source)
+            for source in ("markdown", "html")
+        ):
+            _append_error_once(
+                errors,
+                "missing_progression",
+                "Declared lesson content must follow the dependency progression in Markdown and HTML.",
+                field="reading_sections",
+            )
         support = {item["support"] for item in examples}
-        has_independent = "independent" in support or bool(evidence["response_question_ids"])
+        independent_responses = [
+            item for item in response_questions
+            if item["support"] == "independent" and item["objective_ids"]
+        ]
+        has_independent = "independent" in support or bool(independent_responses)
         if not {"full", "faded"}.issubset(support) or not has_independent:
             errors.append(_error(
                 "missing_worked_example",
@@ -412,6 +505,11 @@ def _progression_errors(evidence: dict) -> list[dict]:
         for item in examples
         for objective_id in item["objective_ids"]
     }
+    practice_coverage.update(
+        objective_id
+        for item in response_questions if item["support"] == "independent"
+        for objective_id in item["objective_ids"]
+    )
     if not objective_ids or not objective_ids.issubset(concept_coverage) or not objective_ids.issubset(practice_coverage):
         errors.append(_error(
             "objective_uncovered",
@@ -421,8 +519,14 @@ def _progression_errors(evidence: dict) -> list[dict]:
     return errors
 
 
-def _artifact_correspondence_errors(markdown: str, html: str, evidence: dict) -> list[dict]:
+def _artifact_correspondence_errors(
+    markdown: str,
+    html: str,
+    evidence: dict,
+) -> tuple[list[dict], list[dict], dict[str, dict[tuple[str, str], int]]]:
     errors: list[dict] = []
+    response_questions: list[dict] = []
+    artifact_positions: dict[str, dict[tuple[str, str], int]] = {"markdown": {}, "html": {}}
     headings = _markdown_headings(markdown)
     heading_counts = Counter(item["heading"] for item in headings)
     indexed_html = _LessonHTMLIndex()
@@ -430,10 +534,11 @@ def _artifact_correspondence_errors(markdown: str, html: str, evidence: dict) ->
         indexed_html.feed(html)
         indexed_html.close()
     except (ValueError, OSError):
-        return [_error("unreadable_artifact", "Required lesson HTML could not be parsed.")]
+        return [_error("unreadable_artifact", "Required lesson HTML could not be parsed.")], response_questions, artifact_positions
 
     declared = evidence["reading_sections"] + evidence["worked_examples"]
     for item in declared:
+        key = ("reading", item["content_id"]) if "content_id" in item else ("example", item["example_id"])
         heading = _normalized_label(item["markdown_heading"])
         if heading_counts[heading] != 1:
             _append_error_once(
@@ -442,6 +547,10 @@ def _artifact_correspondence_errors(markdown: str, html: str, evidence: dict) ->
                 "Every declared Markdown heading must exist exactly once.",
                 field="markdown_heading",
             )
+        else:
+            artifact_positions["markdown"][key] = int(next(
+                heading_item["position"] for heading_item in headings if heading_item["heading"] == heading
+            ))
         if indexed_html.id_counts[item["html_id"]] != 1:
             _append_error_once(
                 errors,
@@ -449,6 +558,8 @@ def _artifact_correspondence_errors(markdown: str, html: str, evidence: dict) ->
                 "Every declared HTML ID must exist exactly once.",
                 field="html_id",
             )
+        else:
+            artifact_positions["html"][key] = indexed_html.id_positions[item["html_id"]][0]
 
     digests: set[str] = set()
     for section in evidence["reading_sections"]:
@@ -466,8 +577,28 @@ def _artifact_correspondence_errors(markdown: str, html: str, evidence: dict) ->
         digests.add(digest)
 
     response_ids = set(evidence["response_question_ids"])
+    objective_ids = {item["objective_id"] for item in evidence["objectives"]}
     question_ids: set[str] = set()
-    required_ids = set(indexed_html.required_control_ids)
+    identified_controls = [item for item in indexed_html.required_control_ids if item is not None]
+    invalid_controls = (
+        len(identified_controls) != len(indexed_html.required_control_ids)
+        or any(_SAFE_ID.fullmatch(item) is None for item in identified_controls)
+        or len(identified_controls) != len(set(identified_controls))
+    )
+    identified_groups = [item for item in indexed_html.question_groups if item is not None]
+    invalid_groups = (
+        len(identified_groups) != len(indexed_html.question_groups)
+        or any(_SAFE_ID.fullmatch(item) is None for item in identified_groups)
+        or len(identified_groups) != len(set(identified_groups))
+    )
+    if invalid_controls or invalid_groups:
+        _append_error_once(
+            errors,
+            "artifact_correspondence",
+            "Required response controls and groups must have safe, unique identities.",
+            field="response_question_ids",
+        )
+    required_ids = set(identified_controls)
     try:
         lesson_data = json.loads("".join(indexed_html.lesson_data_parts))
         questions = lesson_data.get("questions") if isinstance(lesson_data, dict) else None
@@ -480,13 +611,40 @@ def _artifact_correspondence_errors(markdown: str, html: str, evidence: dict) ->
             if not isinstance(question_id, str) or _SAFE_ID.fullmatch(question_id) is None or question_id in question_ids:
                 raise ValueError
             question_ids.add(question_id)
+            support = question.get("support")
+            if support is not None and support not in {"guided", "independent"}:
+                raise ValueError
+            associated_objectives = question.get("objective_ids", [])
+            if (
+                not isinstance(associated_objectives, list)
+                or any(not isinstance(item, str) or _SAFE_ID.fullmatch(item) is None for item in associated_objectives)
+                or len(associated_objectives) != len(set(associated_objectives))
+                or any(item not in objective_ids for item in associated_objectives)
+            ):
+                raise ValueError
+            if question_id in response_ids:
+                html_position = next(
+                    (position for control_id, position in indexed_html.required_control_positions if control_id == question_id),
+                    next(
+                        (position for group, position in indexed_html.question_group_positions if group == question.get("section")),
+                        None,
+                    ),
+                )
+                if html_position is None:
+                    raise ValueError
+                response_questions.append({
+                    "question_id": question_id,
+                    "support": support,
+                    "objective_ids": list(associated_objectives),
+                    "html_position": html_position,
+                })
             if question.get("required", True) is not False:
                 required_ids.add(question_id)
     except (json.JSONDecodeError, TypeError, ValueError):
         _append_error_once(
             errors,
             "artifact_correspondence",
-            "lesson-data must contain valid, uniquely identified response questions.",
+            "lesson-data must contain valid response questions and objective references.",
             field="response_question_ids",
         )
     else:
@@ -504,7 +662,7 @@ def _artifact_correspondence_errors(markdown: str, html: str, evidence: dict) ->
                 "Required response controls must be declared in response_question_ids.",
                 field="response_question_ids",
             )
-    return errors
+    return errors, response_questions, artifact_positions
 
 def _error(code: str, message: str, *, path: str | None = None, field: str | None = None) -> dict:
     item = {"code": code, "message": message}
@@ -536,8 +694,13 @@ def _strip_fenced_code_blocks(text: str) -> str:
     return "".join(retained)
 
 
+def _strip_markdown_html_comments(text: str) -> str:
+    """Remove rendered-invisible HTML comments, including an unclosed tail."""
+    return re.sub(r"<!--.*?(?:-->|$)", "", text, flags=re.DOTALL)
+
+
 def _strip_markdown_noninstructional(text: str) -> str:
-    text = _strip_fenced_code_blocks(text)
+    text = _strip_markdown_html_comments(_strip_fenced_code_blocks(text))
     text = re.sub(r"(?m)^(?: {4}|\t).*(?:\n(?: {4}|\t).*)*", "", text)
     text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*(?:answer(?:s| key)?|sources?|references?)\b.*$(?:\n(?!\s{0,3}#{1,6}\s).*)*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
@@ -555,6 +718,57 @@ def _read_text(path: Path, relative_path: str) -> tuple[str | None, dict | None]
     if any((ord(character) < 32 and character not in "\t\n\r") or 127 <= ord(character) <= 159 for character in text):
         return None, _error("non_text_artifact", "Required lesson artifact must contain text, not binary data.", path=relative_path)
     return text, None
+
+
+def _curriculum_knowledge_ids(root: Path) -> tuple[set[str] | None, dict | None]:
+    relative_path = "curriculum.json"
+    path = root / relative_path
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None, _error(
+            "invalid_artifact_path",
+            "curriculum.json must stay inside the course root.",
+            path=relative_path,
+        )
+    text, read_error = _read_text(path, relative_path)
+    if read_error is not None:
+        return None, read_error
+    try:
+        curriculum = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None, _error(
+            "invalid_curriculum",
+            "curriculum.json must contain valid JSON with knowledge_nodes.",
+            path=relative_path,
+        )
+    nodes = curriculum.get("knowledge_nodes") if isinstance(curriculum, dict) else None
+    if not isinstance(nodes, list):
+        return None, _error(
+            "invalid_curriculum",
+            "curriculum.json knowledge_nodes must be a list.",
+            path=relative_path,
+            field="knowledge_nodes",
+        )
+    identifiers: list[str] = []
+    for index, node in enumerate(nodes):
+        identifier = node.get("knowledge_id") if isinstance(node, dict) else None
+        if not isinstance(identifier, str) or not identifier or _SAFE_ID.fullmatch(identifier) is None:
+            return None, _error(
+                "invalid_curriculum",
+                "Every curriculum knowledge node needs a safe knowledge_id.",
+                path=relative_path,
+                field=f"knowledge_nodes[{index}].knowledge_id",
+            )
+        identifiers.append(identifier)
+    if len(identifiers) != len(set(identifiers)):
+        return None, _error(
+            "invalid_curriculum",
+            "Curriculum knowledge_id values must be unique.",
+            path=relative_path,
+            field="knowledge_nodes",
+        )
+    return set(identifiers), None
 
 
 def _contained_lesson_directory(root: Path, manifest: Mapping[str, object]) -> tuple[Path | None, str | None, dict | None]:
@@ -577,7 +791,8 @@ def _depth_band(planned_minutes: object) -> str | None:
     if (
         isinstance(planned_minutes, bool)
         or not isinstance(planned_minutes, (int, float))
-        or not math.isfinite(planned_minutes)
+        or (isinstance(planned_minutes, float) and not math.isfinite(planned_minutes))
+        or (isinstance(planned_minutes, int) and abs(planned_minutes) > _MAX_FINITE_FLOAT_INTEGER)
     ):
         return None
     for name, limit in DEPTH_LIMITS.items():
@@ -637,6 +852,25 @@ def audit_lesson(root: Path, manifest: Mapping[str, object]) -> dict:
         else:
             report["metrics"]["html_reading_units"] = reading_units(_strip_markdown_noninstructional(" ".join(parser.parts)))
 
+    if quality is not None:
+        known_knowledge_ids, curriculum_error = _curriculum_knowledge_ids(course_root)
+        if curriculum_error is not None:
+            report["errors"].append(curriculum_error)
+        else:
+            prerequisite_ids = {
+                identifier
+                for section in quality["reading_sections"]
+                for identifier in section["prerequisite_knowledge_ids"]
+            }
+            unknown_ids = sorted(prerequisite_ids - known_knowledge_ids)
+            if unknown_ids:
+                report["errors"].append(_error(
+                    "invalid_quality_evidence",
+                    "prerequisite_knowledge_ids reference unknown curriculum knowledge: " + ", ".join(unknown_ids),
+                    path="curriculum.json",
+                    field="reading_sections",
+                ))
+
     planned_minutes = quality["planned_minutes"] if quality is not None else manifest.get("planned_minutes")
     depth_band = _depth_band(planned_minutes)
     if depth_band is None:
@@ -660,6 +894,11 @@ def audit_lesson(root: Path, manifest: Mapping[str, object]) -> dict:
         ))
 
     if quality is not None:
+        correspondence_errors: list[dict] = []
+        response_questions: list[dict] = []
+        artifact_positions: dict[str, dict[tuple[str, str], int]] | None = None
+        if markdown is not None and html is not None:
+            correspondence_errors, response_questions, artifact_positions = _artifact_correspondence_errors(markdown, html, quality)
         response_count = len(quality["response_question_ids"])
         response_share = quality["response_minutes"] / quality["planned_minutes"] if quality["planned_minutes"] else math.inf
         html_fraction = report["metrics"]["html_reading_units"] / max(report["metrics"]["markdown_reading_units"], 1)
@@ -673,7 +912,7 @@ def audit_lesson(root: Path, manifest: Mapping[str, object]) -> dict:
             "response_share": response_share,
             "html_fraction": html_fraction,
         })
-        report["errors"].extend(_progression_errors(quality))
+        report["errors"].extend(_progression_errors(quality, response_questions, artifact_positions))
         if not 0 < quality["reading_minutes"] < quality["planned_minutes"]:
             _append_error_once(
                 report["errors"],
@@ -711,10 +950,9 @@ def audit_lesson(root: Path, manifest: Mapping[str, object]) -> dict:
                 "HTML must preserve at least 90 percent of Markdown instructional units.",
                 path=f"{directory}/lesson.html",
             ))
-        if markdown is not None and html is not None:
-            for error in _artifact_correspondence_errors(markdown, html, quality):
-                if "path" not in error:
-                    error["path"] = f"{directory}/lesson.html" if error.get("field") in {"html_id", "response_question_ids"} else f"{directory}/lesson.md"
-                report["errors"].append(error)
+        for error in correspondence_errors:
+            if "path" not in error:
+                error["path"] = f"{directory}/lesson.html" if error.get("field") in {"html_id", "response_question_ids"} else f"{directory}/lesson.md"
+            report["errors"].append(error)
     report["valid"] = not report["errors"]
     return report
