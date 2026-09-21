@@ -1,4 +1,6 @@
 """Regression coverage for the lesson reading-depth gate."""
+import copy
+import json
 import sys
 from pathlib import Path
 import tempfile
@@ -80,6 +82,248 @@ class LessonQualityTests(unittest.TestCase):
                 "lesson.md", "lesson.html", "exercises.md", "answers.md", "sources.md", "state.json"
             )],
         }
+
+    def make_quality_lesson(self, root, *, repetitions=20):
+        """Create a hand-checkable, fully declared normal-depth lesson."""
+        definitions = [
+            ("Why bond yield matters", "orientation", "Orientation frames the learner's decision before any calculation begins."),
+            ("Bridge from present value", "prerequisite-bridge", "Present value knowledge connects earlier discounting work to the new yield estimate."),
+            ("Price and yield move oppositely", "price-yield", "A fixed promised cash flow becomes less valuable when the required yield rises."),
+            ("Estimate yield with trial prices", "trial-yield", "A trial yield is revised by comparing its calculated price with the observed market price."),
+            ("Connect the reasoning", "synthesis", "The direction rule and trial calculation combine into one defensible estimate."),
+            ("Consolidate the method", "consolidation", "The final check states the cash flows, direction, trial result, and justified conclusion."),
+            ("Worked example: trial yields", "worked-full", "The complete example shows every discounting step and explains the next trial."),
+            ("Faded example: changing price", "worked-faded", "The faded example supplies the cash flows while the learner chooses the yield direction."),
+            ("Independent task: explain the estimate", "worked-independent", "The independent task asks the learner to calculate and justify an unseen bond estimate."),
+        ]
+        markdown_parts = []
+        html_parts = []
+        for index, (heading, html_id, sentence) in enumerate(definitions, start=1):
+            body = " ".join(
+                f"{sentence} Checkpoint {index} reinforces the explanation with observable evidence."
+                for _ in range(repetitions)
+            )
+            markdown_parts.append(f"## {heading}\n\n{body}")
+            html_parts.append(f'<section id="{html_id}"><h2>{heading}</h2><p>{body}</p></section>')
+        question_ids = ("q-direction", "q-trial", "q-explain")
+        questions = [{"id": item, "required": True} for item in question_ids]
+        controls = "".join(f'<textarea data-question-id="{item}" required></textarea>' for item in question_ids)
+        html = "<!doctype html><html><body><main>" + "".join(html_parts) + controls + (
+            '<script id="lesson-data" type="application/json">'
+            + json.dumps({"questions": questions})
+            + "</script></main></body></html>"
+        )
+        manifest = self.make_lesson(
+            root,
+            markdown_text="\n\n".join(markdown_parts),
+            html_text=html,
+            planned_minutes=35,
+        )
+        manifest["learning_objectives"] = [
+            "Estimate yield from a bond price.",
+            "Explain the inverse price-yield relationship.",
+        ]
+        manifest["quality_evidence"] = {
+            "contract_version": 1,
+            "session_depth": "normal",
+            "planned_minutes": 35,
+            "reading_minutes": 25,
+            "response_minutes": 10,
+            "below_target_justification": "",
+            "objectives": [
+                {"objective_id": "estimate-yield", "text": "Estimate yield from a bond price."},
+                {"objective_id": "explain-direction", "text": "Explain the inverse price-yield relationship."},
+            ],
+            "reading_sections": [
+                {"content_id": "orientation", "role": "orientation", "markdown_heading": "Why bond yield matters", "html_id": "orientation", "objective_ids": [], "prerequisite_knowledge_ids": []},
+                {"content_id": "prerequisite-bridge", "role": "prerequisite_bridge", "markdown_heading": "Bridge from present value", "html_id": "prerequisite-bridge", "objective_ids": [], "prerequisite_knowledge_ids": ["present-value"]},
+                {"content_id": "price-yield", "role": "concept", "markdown_heading": "Price and yield move oppositely", "html_id": "price-yield", "objective_ids": ["explain-direction"], "prerequisite_knowledge_ids": ["present-value"]},
+                {"content_id": "trial-yield", "role": "concept", "markdown_heading": "Estimate yield with trial prices", "html_id": "trial-yield", "objective_ids": ["estimate-yield"], "prerequisite_knowledge_ids": ["present-value"]},
+                {"content_id": "synthesis", "role": "synthesis", "markdown_heading": "Connect the reasoning", "html_id": "synthesis", "objective_ids": ["estimate-yield", "explain-direction"], "prerequisite_knowledge_ids": []},
+                {"content_id": "consolidation", "role": "consolidation", "markdown_heading": "Consolidate the method", "html_id": "consolidation", "objective_ids": ["estimate-yield", "explain-direction"], "prerequisite_knowledge_ids": []},
+            ],
+            "worked_examples": [
+                {"example_id": "worked-full", "support": "full", "markdown_heading": "Worked example: trial yields", "html_id": "worked-full", "objective_ids": ["estimate-yield"]},
+                {"example_id": "worked-faded", "support": "faded", "markdown_heading": "Faded example: changing price", "html_id": "worked-faded", "objective_ids": ["explain-direction"]},
+                {"example_id": "worked-independent", "support": "independent", "markdown_heading": "Independent task: explain the estimate", "html_id": "worked-independent", "objective_ids": ["estimate-yield", "explain-direction"]},
+            ],
+            "response_question_ids": list(question_ids),
+            "semantic_review": {
+                "passed": True,
+                "reviewed_at": "2026-09-15T09:30:00+00:00",
+                "revision_summary": "Checked progression, examples, and question alignment.",
+            },
+        }
+        return manifest
+
+    def set_quality_questions(self, root, manifest, question_ids):
+        old_ids = tuple(manifest["quality_evidence"]["response_question_ids"])
+        html_path = root / manifest["lesson_directory"] / "lesson.html"
+        html = html_path.read_text(encoding="utf-8")
+        old_controls = "".join(f'<textarea data-question-id="{item}" required></textarea>' for item in old_ids)
+        new_controls = "".join(f'<textarea data-question-id="{item}" required></textarea>' for item in question_ids)
+        old_data = json.dumps({"questions": [{"id": item, "required": True} for item in old_ids]})
+        new_data = json.dumps({"questions": [{"id": item, "required": True} for item in question_ids]})
+        html_path.write_text(html.replace(old_controls, new_controls).replace(old_data, new_data), encoding="utf-8")
+        manifest["quality_evidence"]["response_question_ids"] = list(question_ids)
+
+    def assert_audit_is_read_only(self, root, manifest, expected_code):
+        before_manifest = copy.deepcopy(manifest)
+        lesson = root / manifest["lesson_directory"]
+        before_markdown = (lesson / "lesson.md").read_bytes()
+        before_html = (lesson / "lesson.html").read_bytes()
+
+        report = lesson_quality.audit_lesson(root, manifest)
+
+        self.assertIn(expected_code, {item["code"] for item in report["errors"]})
+        self.assertEqual(before_manifest, manifest)
+        self.assertEqual(before_markdown, (lesson / "lesson.md").read_bytes())
+        self.assertEqual(before_html, (lesson / "lesson.html").read_bytes())
+        return report
+
+    def test_rejects_exact_quality_contract_mutations_without_writing_inputs(self):
+        """Catches omitting any named semantic-quality boundary or mutating audited inputs."""
+        cases = {
+            "invalid_time_evidence": {"planned_minutes": 29},
+            "missing_progression": {"reading_sections": []},
+            "objective_uncovered": {"objectives": []},
+            "missing_worked_example": {"worked_examples": []},
+            "interaction_overweight": {"response_minutes": 14},
+            "html_content_loss": {"html_fraction": 0.50},
+            "invalid_quality_evidence": {"contract_version": 99},
+        }
+        for expected_code, mutation in cases.items():
+            with self.subTest(expected_code=expected_code), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                if "html_fraction" in mutation:
+                    html_path = root / manifest["lesson_directory"] / "lesson.html"
+                    html = html_path.read_text(encoding="utf-8")
+                    midpoint = html.find('<section id="synthesis">')
+                    controls = html.find('<textarea data-question-id="q-direction"')
+                    html_path.write_text(html[:midpoint] + html[controls:], encoding="utf-8")
+                else:
+                    manifest["quality_evidence"].update(mutation)
+                self.assert_audit_is_read_only(root, manifest, expected_code)
+
+    def test_rejects_repeated_instructional_blocks_under_distinct_content_ids(self):
+        """Catches content IDs disguising repeated filler as distinct progression."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            lesson = root / manifest["lesson_directory"]
+            markdown = (lesson / "lesson.md").read_text(encoding="utf-8")
+            first_body = markdown.split("## Bridge from present value", 1)[0].split("\n\n", 1)[1].strip()
+            start = markdown.index("## Price and yield move oppositely")
+            end = markdown.index("## Estimate yield with trial prices")
+            markdown = markdown[:start] + f"## Price and yield move oppositely\n\n{first_body}\n\n" + markdown[end:]
+            bridge_start = markdown.index("## Bridge from present value")
+            bridge_end = markdown.index("## Price and yield move oppositely")
+            markdown = markdown[:bridge_start] + f"## Bridge from present value\n\n{first_body}\n\n" + markdown[bridge_end:]
+            lesson.joinpath("lesson.md").write_text(markdown, encoding="utf-8")
+
+            self.assert_audit_is_read_only(root, manifest, "duplicate_instructional_content")
+
+    def test_rejects_malformed_quality_evidence_shapes(self):
+        """Catches permissive schema handling for unsafe IDs, references, numbers, and review timestamps."""
+        mutations = {
+            "unknown top-level field": lambda evidence: evidence.update({"notes": "extra"}),
+            "boolean number": lambda evidence: evidence.update({"reading_minutes": True}),
+            "non-finite number": lambda evidence: evidence.update({"response_minutes": float("nan")}),
+            "unsafe ID": lambda evidence: evidence["objectives"][0].update({"objective_id": "../escape"}),
+            "duplicate ID": lambda evidence: evidence["objectives"][1].update({"objective_id": "estimate-yield"}),
+            "duplicate declared HTML ID": lambda evidence: evidence["reading_sections"][3].update({"html_id": "price-yield"}),
+            "unknown objective reference": lambda evidence: evidence["reading_sections"][2]["objective_ids"].append("missing-objective"),
+            "unknown nested field": lambda evidence: evidence["worked_examples"][0].update({"answer": "extra"}),
+            "naive timestamp": lambda evidence: evidence["semantic_review"].update({"reviewed_at": "2026-09-15T09:30:00"}),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                mutate(manifest["quality_evidence"])
+                self.assert_audit_is_read_only(root, manifest, "invalid_quality_evidence")
+
+    def test_normalizes_valid_quality_evidence_into_a_detached_value(self):
+        """Catches a missing public normalizer or one that aliases caller-owned nested values."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            normalizer = getattr(lesson_quality, "normalize_quality_evidence", None)
+            self.assertIsNotNone(normalizer)
+            normalized = normalizer(manifest["quality_evidence"], manifest["learning_objectives"])
+            self.assertEqual(manifest["quality_evidence"], normalized)
+            normalized["objectives"][0]["text"] = "changed"
+            self.assertEqual("Estimate yield from a bond price.", manifest["quality_evidence"]["objectives"][0]["text"])
+
+    def test_reports_normalized_quality_metrics_for_a_valid_lesson(self):
+        """Catches validating evidence without exposing the metrics consumed by later gates."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root)
+            report = lesson_quality.audit_lesson(root, manifest)
+
+        self.assertTrue(report["valid"], report["errors"])
+        self.assertEqual("normal", report["metrics"].get("session_depth"))
+        self.assertEqual(35, report["metrics"].get("planned_minutes"))
+        self.assertEqual(25, report["metrics"].get("reading_minutes"))
+        self.assertEqual(10, report["metrics"].get("response_minutes"))
+        self.assertEqual(2, report["metrics"].get("concept_count"))
+        self.assertEqual(3, report["metrics"].get("response_count"))
+        self.assertAlmostEqual(10 / 35, report["metrics"].get("response_share", -1))
+        self.assertGreaterEqual(report["metrics"].get("html_fraction", -1), 0.90)
+
+    def test_accepts_inclusive_depth_and_response_boundaries(self):
+        """Catches off-by-one duration, response-share, or response-count limits."""
+        cases = (
+            ("light", 12, 2), ("light", 20, 3),
+            ("normal", 30, 3), ("normal", 45, 5),
+            ("deep", 60, 5), ("deep", 90, 8),
+        )
+        for depth, planned_minutes, response_count in cases:
+            with self.subTest(depth=depth, planned_minutes=planned_minutes, response_count=response_count), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                evidence = manifest["quality_evidence"]
+                evidence.update({
+                    "session_depth": depth,
+                    "planned_minutes": planned_minutes,
+                    "reading_minutes": planned_minutes - 1,
+                    "response_minutes": planned_minutes * 0.35,
+                })
+                self.set_quality_questions(root, manifest, [f"q-{index}" for index in range(response_count)])
+                report = lesson_quality.audit_lesson(root, manifest)
+            self.assertTrue(report["valid"], report["errors"])
+
+    def test_warns_below_target_and_requires_a_justification(self):
+        """Catches treating the target reading band as optional without recorded rationale."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = self.make_quality_lesson(root, repetitions=6)
+            report = lesson_quality.audit_lesson(root, manifest)
+            self.assertGreaterEqual(report["metrics"]["markdown_reading_units"], 1800)
+            self.assertLess(report["metrics"]["markdown_reading_units"], 2500)
+            self.assertIn("below_target_reading", {item["code"] for item in report["warnings"]})
+            self.assertIn("invalid_quality_evidence", {item["code"] for item in report["errors"]})
+
+            manifest["quality_evidence"]["below_target_justification"] = "A concise bridge lesson follows prior guided practice."
+            justified = lesson_quality.audit_lesson(root, manifest)
+            self.assertTrue(justified["valid"], justified["errors"])
+            self.assertIn("below_target_reading", {item["code"] for item in justified["warnings"]})
+
+    def test_rejects_missing_declared_content_and_undeclared_required_questions(self):
+        """Catches evidence drifting from canonical headings, HTML IDs, or lesson-data responses."""
+        mutations = {
+            "missing heading": lambda root, manifest: manifest["quality_evidence"]["reading_sections"][0].update({"markdown_heading": "Missing heading"}),
+            "missing HTML ID": lambda root, manifest: manifest["quality_evidence"]["worked_examples"][0].update({"html_id": "missing-html-id"}),
+            "undeclared required question": lambda root, manifest: manifest["quality_evidence"]["response_question_ids"].pop(),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                manifest = self.make_quality_lesson(root)
+                mutate(root, manifest)
+                self.assert_audit_is_read_only(root, manifest, "artifact_correspondence")
 
     def test_rejects_normal_lesson_with_shallow_instructional_reading(self):
         """Catches removing the normal-depth floor from a timed lesson audit."""
